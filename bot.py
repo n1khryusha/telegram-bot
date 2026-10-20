@@ -40,7 +40,7 @@ STEAM_TOPUP_ITEM_ID = "3961593"
 ROBO_LOGIN = "BeaconKeys_bot" # Твой Merchant Login
 ROBO_PASS1 = "mWJ1PA6NG0lX2yKyfm3K"  # Пароль #1 из настроек
 ROBO_PASS2 = "k5vzi0Upj6cSyGQZ0S9C"  # Пароль #2 из настроек
-ROBO_IS_TEST = 1 # 1 - тест, 0 - реальные деньги
+ROBO_IS_TEST = 0 # 1 - тест, 0 - реальные деньги
 # ===================================
 
 logging.basicConfig(level=logging.INFO)
