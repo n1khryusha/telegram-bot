@@ -25,7 +25,7 @@ from yookassa import Configuration, Payment
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = "8961086874:AAGkgetL7pD8znZWAUxsLDdcEAVm6kT646E"
 ADMIN_IDS = [1043675714]
-DB_PATH = "bot.db"
+DB_PATH = "/data/bot.db"
 
 YOOKASSA_SHOP_ID = "ТВОЙ_SHOP_ID"
 YOOKASSA_SECRET_KEY = "ТВОЙ_SECRET_KEY"
