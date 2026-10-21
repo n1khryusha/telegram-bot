@@ -78,7 +78,6 @@ IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 МБ
 _image_cache_size = 0
 
-
 # ---------- БАЗА ----------
 _db_lock = threading.Lock()
 _db_conn: sqlite3.Connection | None = None
@@ -350,8 +349,10 @@ async def fetch_steam_deals():
                                 pd = dd[str(app_id)]["data"].get("price_overview")
                                 if pd:
                                     final_price_str = f"{pd.get('final', 0) / 100:.0f} ₽"
-                                    original_price_str = f"{pd.get('initial', 0) / 100:.0f} ₽" if pd.get("discount_percent") else ""
-                                    discount_str = f"-{pd.get('discount_percent')}%" if pd.get("discount_percent") else ""
+                                    original_price_str = f"{pd.get('initial', 0) / 100:.0f} ₽" if pd.get(
+                                        "discount_percent") else ""
+                                    discount_str = f"-{pd.get('discount_percent')}%" if pd.get(
+                                        "discount_percent") else ""
                 except Exception:
                     pass
                 db_query(
@@ -637,7 +638,7 @@ async def start_cmd(message: Message):
     register_user(message)
     is_prem = check_premium(message.from_user.id)
     premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
-    
+
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "🐷 Я бот для выгодных покупок.\n"
@@ -647,7 +648,7 @@ async def start_cmd(message: Message):
         "Выбирай раздел ниже 👇",
         reply_markup=main_menu_kb(),
     )
-    
+
     # Юридическая информация для Robokassa
     await message.answer(
         "⚖️ <b>Юридическая информация</b>\n\n"
@@ -939,7 +940,8 @@ async def wl_add_start(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         f"⭐ <b>Добавление в Wishlist</b>\n\nНапиши название игры.\nУ тебя: {count} / {limit} игр.\n\n"
         f"<i>Напиши «отмена», чтобы выйти.</i>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="wl_cancel")]]),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="wl_cancel")]]),
     )
     await cb.answer()
 
@@ -1173,7 +1175,8 @@ async def premium_menu(message: Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🔥 7 дней — {PRICE_7_DAYS} ₽", callback_data=f"promo_{PRICE_7_DAYS}_7")],
-        [InlineKeyboardButton(text=f"👑 30 дней — {PRICE_30_DAYS} ₽ (выгодно!)", callback_data=f"promo_{PRICE_30_DAYS}_30")],
+        [InlineKeyboardButton(text=f"👑 30 дней — {PRICE_30_DAYS} ₽ (выгодно!)",
+                              callback_data=f"promo_{PRICE_30_DAYS}_30")],
     ])
     await message.answer(
         f"{status}"
