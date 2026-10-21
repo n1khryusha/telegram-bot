@@ -50,6 +50,12 @@ ROBO_LOGIN = os.getenv("ROBO_LOGIN", "")
 ROBO_PASS1 = os.getenv("ROBO_PASS1", "")
 ROBO_PASS2 = os.getenv("ROBO_PASS2", "")
 ROBO_IS_TEST = int(os.getenv("ROBO_IS_TEST", "0"))
+
+# --- ЮРИДИЧЕСКАЯ ИНФОРМАЦИЯ ---
+OFFER_URL = "https://disk.yandex.ru/d/o9me2ZalTIV3Ig"
+CONTACT_TG = "@ObuzaMeduza"
+CONTACT_EMAIL = "n1khryusha.work@gmail.com"
+INN = "360903175784"
 # ===================================
 
 if not BOT_TOKEN:
@@ -165,7 +171,6 @@ def is_ascii_digits(s: str) -> bool:
 
 
 def safe_html_truncate(text: str, limit: int = 200) -> str:
-    """Обрезает текст и убирает незакрытые HTML-теги в конце."""
     if not text:
         return ""
     text = text[:limit]
@@ -539,7 +544,6 @@ async def check_robokassa_payments(bot: Bot):
         fetch=True,
     )
     for inv_id, user_id, amount, days in pending:
-        # ✅ правильный формат: MerchantLogin:InvoiceID:Password#2
         sig_str = f"{ROBO_LOGIN}:{inv_id}:{ROBO_PASS2}"
         sig = hashlib.md5(sig_str.encode()).hexdigest()
         url = (
@@ -590,7 +594,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра")],
                 [KeyboardButton(text="💳 Пополнить Steam"), KeyboardButton(text="📱 Мобильные игры")],
                 [KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-                [KeyboardButton(text="📢 Реклама")],
+                [KeyboardButton(text="📢 Реклама"), KeyboardButton(text="⚖️ Документы")],
             ],
             resize_keyboard=True,
         )
@@ -633,6 +637,7 @@ async def start_cmd(message: Message):
     register_user(message)
     is_prem = check_premium(message.from_user.id)
     premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
+    
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "🐷 Я бот для выгодных покупок.\n"
@@ -641,6 +646,17 @@ async def start_cmd(message: Message):
         f"{premium_text}\n"
         "Выбирай раздел ниже 👇",
         reply_markup=main_menu_kb(),
+    )
+    
+    # Юридическая информация для Robokassa
+    await message.answer(
+        "⚖️ <b>Юридическая информация</b>\n\n"
+        "Ознакомиться с условиями оказания услуг, правилами возврата и офертой вы можете по ссылке ниже.\n\n"
+        f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n"
+        f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)]
+        ])
     )
 
 
@@ -1239,8 +1255,24 @@ async def ads_info(message: Message):
     await message.answer(
         "📢 <b>Реклама в нашем боте</b>\n\n"
         "🎯 Пост в рассылке, закреп, упоминание в «Скидке дня».\n\n"
-        "Пиши: 👉 <b>@ObuzaMeduza</b>",
+        f"Пиши: 👉 <b>{CONTACT_TG}</b>",
         reply_markup=main_menu_kb(),
+    )
+
+
+# ---------- ДОКУМЕНТЫ (ДЛЯ ROBOKASSA) ----------
+@router.message(F.text == "⚖️ Документы")
+async def docs_info(message: Message):
+    await message.answer(
+        "⚖️ <b>Юридическая информация</b>\n\n"
+        "📄 <b>Публичная оферта:</b> нажми на кнопку ниже.\n"
+        f"📞 <b>Контакты:</b> {CONTACT_TG}\n"
+        f"✉️ <b>Email:</b> {CONTACT_EMAIL}\n"
+        f"🆔 <b>Продавец:</b> Самозанятый, ИНН {INN}\n\n"
+        "Правила возврата средств указаны в оферте.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Открыть оферту", url=OFFER_URL)]
+        ])
     )
 
 
