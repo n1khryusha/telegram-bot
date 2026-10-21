@@ -78,6 +78,7 @@ IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 МБ
 _image_cache_size = 0
 
+
 # ---------- БАЗА ----------
 _db_lock = threading.Lock()
 _db_conn: sqlite3.Connection | None = None
@@ -349,10 +350,8 @@ async def fetch_steam_deals():
                                 pd = dd[str(app_id)]["data"].get("price_overview")
                                 if pd:
                                     final_price_str = f"{pd.get('final', 0) / 100:.0f} ₽"
-                                    original_price_str = f"{pd.get('initial', 0) / 100:.0f} ₽" if pd.get(
-                                        "discount_percent") else ""
-                                    discount_str = f"-{pd.get('discount_percent')}%" if pd.get(
-                                        "discount_percent") else ""
+                                    original_price_str = f"{pd.get('initial', 0) / 100:.0f} ₽" if pd.get("discount_percent") else ""
+                                    discount_str = f"-{pd.get('discount_percent')}%" if pd.get("discount_percent") else ""
                 except Exception:
                     pass
                 db_query(
@@ -610,7 +609,7 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="🔄 Спарсить скидки"), KeyboardButton(text="📊 Статистика")],
                 [KeyboardButton(text="💳 Проверить оплаты"), KeyboardButton(text="👑 Премиум-юзеры")],
                 [KeyboardButton(text="🎁 Выдать премиум"), KeyboardButton(text="🚫 Снять премиум")],
-                [KeyboardButton(text="⬅️ В меню")],
+                [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="⬅️ В меню")],
             ],
             resize_keyboard=True,
         )
@@ -632,13 +631,17 @@ class AdminPremiumFSM(StatesGroup):
     waiting_days = State()
 
 
+class AdminBroadcastFSM(StatesGroup):
+    waiting_message = State()
+
+
 # ---------- СТАРТ ----------
 @router.message(CommandStart())
 async def start_cmd(message: Message):
     register_user(message)
     is_prem = check_premium(message.from_user.id)
     premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
-
+    
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "🐷 Я бот для выгодных покупок.\n"
@@ -648,7 +651,7 @@ async def start_cmd(message: Message):
         "Выбирай раздел ниже 👇",
         reply_markup=main_menu_kb(),
     )
-
+    
     # Юридическая информация для Robokassa
     await message.answer(
         "⚖️ <b>Юридическая информация</b>\n\n"
@@ -940,8 +943,7 @@ async def wl_add_start(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         f"⭐ <b>Добавление в Wishlist</b>\n\nНапиши название игры.\nУ тебя: {count} / {limit} игр.\n\n"
         f"<i>Напиши «отмена», чтобы выйти.</i>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="wl_cancel")]]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="wl_cancel")]]),
     )
     await cb.answer()
 
@@ -1175,8 +1177,7 @@ async def premium_menu(message: Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🔥 7 дней — {PRICE_7_DAYS} ₽", callback_data=f"promo_{PRICE_7_DAYS}_7")],
-        [InlineKeyboardButton(text=f"👑 30 дней — {PRICE_30_DAYS} ₽ (выгодно!)",
-                              callback_data=f"promo_{PRICE_30_DAYS}_30")],
+        [InlineKeyboardButton(text=f"👑 30 дней — {PRICE_30_DAYS} ₽ (выгодно!)", callback_data=f"promo_{PRICE_30_DAYS}_30")],
     ])
     await message.answer(
         f"{status}"
@@ -1507,6 +1508,84 @@ async def admin_prem_cancel(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+# ---------- РАССЫЛКА (АДМИН) ----------
+@router.message(F.text == "📢 Рассылка")
+async def admin_broadcast_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(AdminBroadcastFSM.waiting_message)
+    await message.answer(
+        "📢 <b>Режим рассылки</b>\n\n"
+        "Отправь мне сообщение (текст и/или фото), которое нужно разослать всем пользователям.\n\n"
+        "<i>Напиши «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Отмена")]],
+            resize_keyboard=True,
+        ),
+    )
+
+
+@router.message(AdminBroadcastFSM.waiting_message)
+async def admin_broadcast_send(message: Message, state: FSMContext, bot: Bot):
+    if not is_admin(message.from_user.id):
+        return
+
+    if message.text == "⬅️ Отмена" or (message.text and message.text.lower() in ("отмена", "cancel", "/cancel")):
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.", reply_markup=admin_menu_kb())
+        return
+
+    # Если админ прислал фото (с подписью или без) или просто текст
+    photo_id = message.photo[-1].file_id if message.photo else None
+    text = message.text if message.text else message.caption
+
+    if not photo_id and not text:
+        await message.answer("⚠️ Сообщение пустое. Отправь текст или фото.")
+        return
+
+    users = db_query("SELECT user_id FROM users", fetch=True)
+    total = len(users)
+    await state.clear()
+
+    msg = await message.answer(f"⏳ Начинаю рассылку для {total} пользователей...", reply_markup=admin_menu_kb())
+
+    sent = 0
+    blocked = 0
+
+    for (uid,) in users:
+        try:
+            if photo_id:
+                await bot.send_photo(
+                    chat_id=uid,
+                    photo=photo_id,
+                    caption=text,
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await bot.send_message(
+                    chat_id=uid,
+                    text=text,
+                    parse_mode=ParseMode.HTML
+                )
+            sent += 1
+        except TelegramBadRequest as e:
+            if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
+                db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+            blocked += 1
+        except Exception as e:
+            logger.warning(f"[BROADCAST] {uid}: {e}")
+            blocked += 1
+
+        await asyncio.sleep(0.05) # Задержка, чтобы не забанили за флуд
+
+    await msg.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📤 Отправлено: {sent}\n"
+        f"🚫 Заблокировали/Ошибка: {blocked}",
+        reply_markup=admin_menu_kb()
+    )
+
+
 # ---------- ЗАПУСК ----------
 async def main():
     db_init()
@@ -1524,7 +1603,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен! Robokassa + ежедневная рулетка.")
+    logger.info("Бот запущен! Robokassa + Рассылка добавлена.")
     try:
         await dp.start_polling(bot)
     finally:
