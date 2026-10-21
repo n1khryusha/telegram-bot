@@ -569,7 +569,7 @@ async def check_robokassa_payments(bot: Bot):
                     user_id,
                     f"✅ Оплата прошла! Премиум активирован на {days} дн.\n\n"
                     f"👑 Теперь тебе доступны: безлимитная рулетка, уведомления о скидках на Wishlist, "
-                    f"алерты 80%+, промокод VIP10!",
+                    f"алерты 80%+!",
                 )
             except Exception:
                 pass
@@ -659,7 +659,6 @@ async def profile_menu(message: Message):
     if is_prem and until:
         days_left = (until - datetime.now()).days + 1
         text += f"👑 Статус: <b>Премиум</b> (до {until.strftime('%d.%m.%Y')})\n⏳ Осталось: <b>{days_left} дн.</b>\n"
-        text += "\n🎁 <b>Твой бонус:</b> промокод <code>VIP10</code> на 10% к пополнению Steam\n"
     else:
         text += f"💎 Статус: <b>Обычный</b>\n"
     text += f"\n⭐ <b>Wishlist:</b> {w_count} / {w_limit} игр\n"
@@ -1154,21 +1153,24 @@ async def premium_menu(message: Message):
     if is_prem:
         until = get_premium_until(message.from_user.id)
         if until:
-            status = f"👑 <b>Премиум активен до {until.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+            status = f"👑 <b>Твой Премиум активен до {until.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🔥 7 дней — {PRICE_7_DAYS} ₽ (выгодно!)", callback_data=f"promo_{PRICE_7_DAYS}_7")],
-        [InlineKeyboardButton(text=f"👑 30 дней — {PRICE_30_DAYS} ₽ (макс. выгода)", callback_data=f"promo_{PRICE_30_DAYS}_30")],
+        [InlineKeyboardButton(text=f"🔥 7 дней — {PRICE_7_DAYS} ₽", callback_data=f"promo_{PRICE_7_DAYS}_7")],
+        [InlineKeyboardButton(text=f"👑 30 дней — {PRICE_30_DAYS} ₽ (выгодно!)", callback_data=f"promo_{PRICE_30_DAYS}_30")],
     ])
     await message.answer(
         f"{status}"
         "💎 <b>Премиум-доступ</b>\n\n"
-        "Что ты получаешь:\n"
-        "🎲 <b>Безлимитная рулетка</b> — крути сколько хочешь\n"
-        "🏆 <b>Топ-скидки в рулетке</b> — только выгодные игры\n"
-        "⭐ <b>Wishlist до 10 игр</b> + уведомления о скидках на них\n"
-        "🔔 <b>Мгновенные алерты</b> о скидках 80%+\n"
-        "🎁 <b>Промокод VIP10</b> на бонус к пополнению Steam\n\n"
+        "Открой все возможности бота:\n\n"
+        "🎲 <b>Безлимитная рулетка</b>\n"
+        "   <i>Крути сколько хочешь и находи лучшие скидки первым.</i>\n\n"
+        "🏆 <b>Только топовые скидки</b>\n"
+        "   <i>Рулетка выдает игры с максимальным процентом скидки.</i>\n\n"
+        "⭐ <b>Wishlist до 10 игр</b>\n"
+        "   <i>Добавляй больше игр в список желаемого.</i>\n\n"
+        "🔔 <b>Мгновенные алерты</b>\n"
+        "   <i>Персональные уведомления, как только на игру из Wishlist появляется скидка или цена падает ниже 80%.</i>\n\n"
         "Выбери срок:",
         reply_markup=kb,
     )
