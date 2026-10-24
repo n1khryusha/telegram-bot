@@ -53,6 +53,7 @@ ROBO_IS_TEST = int(os.getenv("ROBO_IS_TEST", "0"))
 
 # --- ЮРИДИЧЕСКАЯ ИНФОРМАЦИЯ ---
 OFFER_URL = "https://disk.yandex.ru/d/o9me2ZalTIV3Ig"
+PRIVACY_URL = "https://disk.yandex.ru/d/dLYJbTLifD15fA"
 CONTACT_TG = "@ObuzaMeduza"
 CONTACT_EMAIL = "n1khryusha.work@gmail.com"
 INN = "360903175784"
@@ -652,14 +653,15 @@ async def start_cmd(message: Message):
         reply_markup=main_menu_kb(),
     )
     
-    # Юридическая информация для Robokassa
+    # Юридическая информация
     await message.answer(
         "⚖️ <b>Юридическая информация</b>\n\n"
         "Ознакомиться с условиями оказания услуг, правилами возврата и офертой вы можете по ссылке ниже.\n\n"
         f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n"
         f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)]
+            [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)],
+            [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)]
         ])
     )
 
@@ -1264,18 +1266,18 @@ async def ads_info(message: Message):
     )
 
 
-# ---------- ДОКУМЕНТЫ (ДЛЯ ROBOKASSA) ----------
+# ---------- ДОКУМЕНТЫ (ДЛЯ ПЛАТЕЖНЫХ СИСТЕМ) ----------
 @router.message(F.text == "⚖️ Документы")
 async def docs_info(message: Message):
     await message.answer(
         "⚖️ <b>Юридическая информация</b>\n\n"
-        "📄 <b>Публичная оферта:</b> нажми на кнопку ниже.\n"
-        f"📞 <b>Контакты:</b> {CONTACT_TG}\n"
-        f"✉️ <b>Email:</b> {CONTACT_EMAIL}\n"
-        f"🆔 <b>Продавец:</b> Самозанятый, ИНН {INN}\n\n"
+        "Ознакомьтесь с документами перед использованием бота:\n\n"
+        f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n"
+        f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}\n\n"
         "Правила возврата средств указаны в оферте.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📄 Открыть оферту", url=OFFER_URL)]
+            [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)],
+            [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)]
         ])
     )
 
@@ -1535,7 +1537,6 @@ async def admin_broadcast_send(message: Message, state: FSMContext, bot: Bot):
         await message.answer("❌ Рассылка отменена.", reply_markup=admin_menu_kb())
         return
 
-    # Если админ прислал фото (с подписью или без) или просто текст
     photo_id = message.photo[-1].file_id if message.photo else None
     text = message.text if message.text else message.caption
 
@@ -1576,7 +1577,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext, bot: Bot):
             logger.warning(f"[BROADCAST] {uid}: {e}")
             blocked += 1
 
-        await asyncio.sleep(0.05) # Задержка, чтобы не забанили за флуд
+        await asyncio.sleep(0.05)
 
     await msg.edit_text(
         f"✅ <b>Рассылка завершена!</b>\n\n"
