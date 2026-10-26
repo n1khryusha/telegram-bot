@@ -73,7 +73,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
-        RotatingFileHandler(LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"),
+        RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"), # Уменьшили логи
     ],
 )
 logger = logging.getLogger("bot")
@@ -87,9 +87,9 @@ PAGE_LIMIT = 50
 WISHLIST_LIMIT_FREE = 1
 WISHLIST_LIMIT_PREMIUM = 10
 
-# ---------- КЭШ КАРТИНОК (ограниченный) ----------
+# ---------- КЭШ КАРТИНОК (УМЕНЬШЕН) ----------
 IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
-IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024
+IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024  # 10 МБ (вместо 50)
 _image_cache_size = 0
 
 
@@ -198,7 +198,6 @@ def db_init():
 
 
 def db_query(sql, params=(), fetch=False, fetchone=False):
-    """Возвращает rows / row / (rowcount, lastrowid) для write-запросов."""
     with _db_lock:
         cur = _db_conn.cursor()
         cur.execute(sql, params)
@@ -217,7 +216,6 @@ def db_query(sql, params=(), fetch=False, fetchone=False):
 
 
 def db_exec(sql, params=()) -> int:
-    """Возвращает rowcount (для атомарных проверок)."""
     with _db_lock:
         cur = _db_conn.cursor()
         cur.execute(sql, params)
@@ -235,7 +233,6 @@ def is_ascii_digits(s: str) -> bool:
 
 
 def safe_html_truncate(text: str, limit: int = 200) -> str:
-    """Экранирует HTML и обрезает без разрыва тегов."""
     if not text:
         return ""
     text = html.escape(text, quote=False)
@@ -354,11 +351,6 @@ async def download_image(url: str) -> bytes | None:
 
 async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_url: str | None,
                           caption: str, reply_markup) -> bool:
-    """
-    Умная отправка: сначала пробуем file_id из БД (мгновенно),
-    затем bytes из кэша/скачиваем. После успешной отправки сохраняем file_id.
-    Возвращает True если ушло фото, False если надо fallback на текст.
-    """
     tg_file_id = None
     if product_id:
         row = db_query("SELECT tg_file_id FROM products WHERE id = ?", (product_id,), fetchone=True)
@@ -371,7 +363,6 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
                                  caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             return True
         except TelegramBadRequest:
-            # file_id протух — сбрасываем
             if product_id:
                 db_query("UPDATE products SET tg_file_id = NULL WHERE id = ?", (product_id,))
 
@@ -399,7 +390,6 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
 
 # ---------- ПАРСЕР STEAM ----------
 async def _steam_get_details(session, app_id):
-    """Возвращает dict с header_image, short_description, price_overview."""
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=ru&l=russian"
     result = {"image": "", "description": "", "price_overview": None}
     try:
@@ -417,7 +407,6 @@ async def _steam_get_details(session, app_id):
 
 
 def _format_price(price_overview) -> tuple[str, str, str]:
-    """Возвращает (final_price_str, original_price_str, discount_str)."""
     if not price_overview:
         return "", "", ""
     final = price_overview.get("final", 0) / 100
@@ -552,8 +541,6 @@ async def send_daily_deal(bot: Bot):
 
 # ---------- УВЕДОМЛЕНИЯ WISHLIST ----------
 async def notify_wishlist_matches(bot: Bot):
-    # escape_like применяем на стороне Python — вытащим все wishlist премиум-юзеров,
-    # затем сматчим в SQL с экранированием
     rows = db_query("""
         SELECT wt.user_id, wt.title
         FROM wishlist_titles wt
@@ -629,7 +616,6 @@ async def notify_premium_super_deals(bot: Bot):
 
 # ---------- ROBOKASSA ----------
 def _gen_inv_id() -> int:
-    """Уникальный InvId: ms + random-суффикс."""
     return int(time.time() * 1000) * 1000 + random.randint(0, 999)
 
 
@@ -697,13 +683,12 @@ async def check_robokassa_payments(bot: Bot):
             if not out_sum or int(float(out_sum)) != amount:
                 logger.warning(f"[ROBO] Сумма не совпадает: {out_sum} != {amount}")
                 continue
-            # Атомарное подтверждение
             rows = db_exec(
                 "UPDATE payments SET status='confirmed' WHERE payment_id=? AND status='pending'",
                 (str(inv_id),),
             )
             if rows == 0:
-                continue  # уже подтверждён другим инстансом
+                continue
             add_premium_days(user_id, days)
             try:
                 await bot.send_message(
@@ -775,8 +760,6 @@ class AdminBroadcastFSM(StatesGroup):
 
 # ---------- MIDDLEWARE: РЕГИСТРАЦИЯ + ОБНОВЛЕНИЕ ДАННЫХ ----------
 class UserSyncMiddleware:
-    """Регистрирует юзера при любом событии, обновляет username/first_name."""
-
     async def __call__(self, handler, event, data):
         user = None
         if isinstance(event, Message):
@@ -794,7 +777,6 @@ class UserSyncMiddleware:
 # ---------- ГЛОБАЛЬНЫЙ ERROR-HANDLER ----------
 async def errors_handler(event, exception: Exception, bot: Bot):
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
-    # Уведомление админам (не чаще 1 раза за 5 мин на тип ошибки — грубая защита)
     try:
         msg = f"⚠️ <b>Ошибка</b>\n<code>{html.escape(type(exception).__name__)}: {html.escape(str(exception)[:300])}</code>"
         for admin_id in ADMIN_IDS:
@@ -804,7 +786,7 @@ async def errors_handler(event, exception: Exception, bot: Bot):
                 pass
     except Exception:
         pass
-    return True  # подавляем — polling продолжается
+    return True
 
 
 # ---------- СТАРТ ----------
@@ -958,7 +940,6 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
         return
     try:
         if msg.photo:
-            # Попробуем edit_media через file_id
             tg_file_id = None
             row = db_query("SELECT tg_file_id FROM products WHERE id = ?", (pid,), fetchone=True)
             if row and row[0]:
@@ -982,7 +963,6 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
             return
         logger.debug(f"[PAGINATION] {e}")
 
-    # Fallback: удаляем старое и шлём новое
     ok = await send_game_photo(cb.bot, msg.chat.id, pid, image, text, kb)
     if not ok:
         try:
@@ -1363,7 +1343,6 @@ async def mobile_help(cb: CallbackQuery):
 
 # ---------- ПРЕМИУМ ----------
 async def premium_menu(message: Message, user_id: int | None = None):
-    """user_id явно передаётся для callback-кейсов (там from_user = бот)."""
     uid = user_id if user_id is not None else message.from_user.id
     is_prem = check_premium(uid)
     status = ""
@@ -1402,7 +1381,6 @@ async def premium_menu_msg(message: Message):
 async def premium_show(cb: CallbackQuery):
     await cb.answer()
     if cb.message:
-        # ВАЖНО: передаём cb.from_user.id — иначе проверим статус бота
         await premium_menu(cb.message, user_id=cb.from_user.id)
 
 
@@ -1741,7 +1719,6 @@ async def admin_broadcast_preview(message: Message, state: FSMContext, bot: Bot)
     await state.set_state(AdminBroadcastFSM.waiting_confirm)
 
     total = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
-    # оценка: 0.05s/msg
     eta_sec = total * 0.05
     eta_str = f"{int(eta_sec // 60)} мин {int(eta_sec % 60)} сек"
 
@@ -1755,7 +1732,6 @@ async def admin_broadcast_preview(message: Message, state: FSMContext, bot: Bot)
             [InlineKeyboardButton(text="❌ Отмена", callback_data="bc_cancel")],
         ]),
     )
-    # сам предпросмотр
     try:
         if photo_id:
             await bot.send_photo(
@@ -1840,7 +1816,8 @@ async def main():
     dp.errors.register(errors_handler)
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(fetch_steam_deals, "interval", hours=6, max_instances=1)
+    # ОПТИМИЗАЦИЯ: Парсим скидки реже (раз в 12 часов), чтобы не грузить 0.5 ядра
+    scheduler.add_job(fetch_steam_deals, "interval", hours=12, max_instances=1)
     scheduler.add_job(check_robokassa_payments, "interval", minutes=1, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=12, minute=0, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
@@ -1849,7 +1826,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен!")
+    logger.info("Бот запущен! (Оптимизированная версия)")
     try:
         await dp.start_polling(bot)
     finally:
