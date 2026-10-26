@@ -56,6 +56,7 @@ ROBO_PASS2 = os.getenv("ROBO_PASS2", "")
 ROBO_IS_TEST = int(os.getenv("ROBO_IS_TEST", "0"))
 
 # --- ЮРИДИЧЕСКАЯ ИНФОРМАЦИЯ ---
+WEBSITE_URL = "https://mend-good-violet.tilda.ws/"
 OFFER_URL = "https://disk.yandex.ru/d/o9me2ZalTIV3Ig"
 PRIVACY_URL = "https://disk.yandex.ru/d/dLYJbTLifD15fA"
 CONTACT_TG = "@ObuzaMeduza"
@@ -828,6 +829,7 @@ async def start_cmd(message: Message):
         f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n"
         f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Наш сайт", url=WEBSITE_URL)],
             [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)],
             [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)],
         ]),
@@ -1470,6 +1472,7 @@ async def docs_info(message: Message):
         f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}\n\n"
         "Правила возврата средств указаны в оферте.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Наш сайт", url=WEBSITE_URL)],
             [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)],
             [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)],
         ]),
