@@ -60,7 +60,7 @@ WEBSITE_URL = "https://mend-good-violet.tilda.ws/"
 OFFER_URL = "https://disk.yandex.ru/d/o9me2ZalTIV3Ig"
 PRIVACY_URL = "https://disk.yandex.ru/d/dLYJbTLifD15fA"
 CONTACT_TG = "@ObuzaMeduza"
-CONTACT_EMAIL = "n1khryusha.work@gmail.com"
+CONTACT_EMAIL = "nikhrushawork@gmail.com"
 INN = "360903175784"
 # ===================================
 
@@ -73,7 +73,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
-        RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"), # Уменьшили логи
+        RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"),
     ],
 )
 logger = logging.getLogger("bot")
@@ -89,7 +89,7 @@ WISHLIST_LIMIT_PREMIUM = 10
 
 # ---------- КЭШ КАРТИНОК (УМЕНЬШЕН) ----------
 IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
-IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024  # 10 МБ (вместо 50)
+IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024  # 10 МБ
 _image_cache_size = 0
 
 
@@ -1816,7 +1816,6 @@ async def main():
     dp.errors.register(errors_handler)
 
     scheduler = AsyncIOScheduler()
-    # ОПТИМИЗАЦИЯ: Парсим скидки реже (раз в 12 часов), чтобы не грузить 0.5 ядра
     scheduler.add_job(fetch_steam_deals, "interval", hours=12, max_instances=1)
     scheduler.add_job(check_robokassa_payments, "interval", minutes=1, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=12, minute=0, args=[bot], max_instances=1)
