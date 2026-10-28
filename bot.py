@@ -569,11 +569,8 @@ async def profile_menu(message: Message):
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
     text += f"🎁 <b>Заработано дней Премиума:</b> {ref_earned_days}\n"
 
-    bot_info = await message.bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
-    
     buttons = [
-        [InlineKeyboardButton(text="🎁 Пригласить друга (+7 дней)", url=ref_link)],
+        [InlineKeyboardButton(text="🎁 Пригласить друга (+7 дней)", callback_data="show_ref_link")],
         [InlineKeyboardButton(text="⭐ Мой Wishlist", callback_data="wl_show")],
     ]
     if w_count < w_limit:
@@ -591,9 +588,6 @@ async def premium_menu(message: Message, user_id: int | None = None):
     status = ""
     if is_prem and until:
         status = f"👑 <b>Твой Премиум активен до {until.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
-
-    bot_info = await message.bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
 
     text = (
         f"{status}"
@@ -613,7 +607,7 @@ async def premium_menu(message: Message, user_id: int | None = None):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Пригласить друга", url=ref_link)],
+        [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref_link")],
     ])
     
     await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
@@ -626,6 +620,22 @@ async def premium_menu_msg(message: Message):
 async def premium_show(cb: CallbackQuery):
     await cb.answer()
     if cb.message: await premium_menu(cb.message, user_id=cb.from_user.id)
+
+# ---------- ССЫЛКА НА ДРУГА (ИСПРАВЛЕНО) ----------
+@router.callback_query(F.data == "show_ref_link")
+async def show_ref_link(cb: CallbackQuery):
+    uid = cb.from_user.id
+    bot_info = await cb.bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    
+    await cb.message.answer(
+        f"🔗 <b>Твоя реферальная ссылка:</b>\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"<i>Нажми на ссылку, чтобы скопировать её, и отправь другу.</i>\n\n"
+        f"За каждого друга, который зайдет по ней, ты получишь <b>+{REF_BONUS_DAYS} дней Премиума</b>!",
+        parse_mode=ParseMode.HTML
+    )
+    await cb.answer()
 
 # ---------- СКИДКИ ----------
 @router.message(F.text == "🔥 Скидки")
@@ -872,7 +882,7 @@ async def mobile_help(cb: CallbackQuery):
     await cb.answer()
     await cb.message.answer("❓ <b>Как пополнить мобильную игру</b>\n\n1️⃣ Нажми «Пополнить мобильные игры»\n2️⃣ Выбери свою игру из списка\n3️⃣ Введи <b>игровой ID</b> (не логин/пароль!)\n4️⃣ Выбери номинал (например, 60 гемов, 100 UC)\n5️⃣ Оплати картой\n\n⚠️ <b>Важно:</b> вводи только игровой ID!\n\n" f"Если что-то пошло не так — пиши {PLATI_SUPPORT}")
 
-# ---------- РЕКЛАМА (ОБНОВЛЕНО) ----------
+# ---------- РЕКЛАМА ----------
 @router.message(F.text == "📢 Реклама")
 async def ads_info(message: Message):
     await message.answer(
@@ -1064,7 +1074,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (без сайта и оферты, с реферальной системой)!")
+    logger.info("Бот запущен (с исправленной реферальной ссылкой)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
