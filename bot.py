@@ -44,13 +44,9 @@ STEAM_TOPUP_ITEM_ID = os.getenv("STEAM_TOPUP_ITEM_ID", "3961593")
 # --- РЕФЕРАЛЬНАЯ СИСТЕМА ---
 REF_BONUS_DAYS = 7  # Сколько дней премиума даем за друга
 
-# --- ЮРИДИЧЕСКАЯ ИНФОРМАЦИЯ ---
-WEBSITE_URL = "https://mend-good-violet.tilda.ws/"
-OFFER_URL = "https://disk.yandex.ru/d/o9me2ZalTIV3Ig"
-PRIVACY_URL = "https://disk.yandex.ru/d/dLYJbTLifD15fA"
+# --- КОНТАКТЫ ---
 CONTACT_TG = "@ObuzaMeduza"
 CONTACT_EMAIL = "nikhrushawork@gmail.com"
-INN = "360903175784"
 # ===================================
 
 if not BOT_TOKEN:
@@ -213,10 +209,8 @@ def upsert_user(user_id: int, username: str | None, first_name: str | None, refe
         return
     row = db_query("SELECT user_id, referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
     if row:
-        # Пользователь уже есть
         db_query("UPDATE users SET username=?, first_name=? WHERE user_id=?", (username, first_name, user_id))
     else:
-        # Новый пользователь
         db_query(
             "INSERT INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)",
             (user_id, username, first_name, referred_by)
@@ -451,7 +445,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра")],
             [KeyboardButton(text="💳 Пополнить Steam"), KeyboardButton(text="📱 Мобильные игры")],
             [KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="📢 Реклама"), KeyboardButton(text="⚖️ Документы")],
+            [KeyboardButton(text="📢 Реклама"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
     )
@@ -508,15 +502,12 @@ async def start_ref(message: Message, command: CommandObject):
         except (ValueError, IndexError):
             pass
     
-    # Проверяем, новый ли это юзер
     existing = db_query("SELECT user_id FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
     is_new = existing is None
     
     upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
     
-    # Если новый и есть реферер — начисляем бонус
     if is_new and referrer_id and referrer_id != message.from_user.id:
-        # Проверяем, не накрутка ли (реферер существует)
         ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
         if ref_row:
             add_premium_days(referrer_id, REF_BONUS_DAYS)
@@ -538,17 +529,6 @@ async def start_ref(message: Message, command: CommandObject):
         "Выбирай раздел ниже 👇",
         reply_markup=main_menu_kb(),
     )
-    await message.answer(
-        "⚖️ <b>Юридическая информация</b>\n\n"
-        "Ознакомиться с условиями оказания услуг, правилами возврата и офертой вы можете по ссылке ниже.\n\n"
-        f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n"
-        f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🌐 Наш сайт", url=WEBSITE_URL)],
-            [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)],
-            [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)],
-        ]),
-    )
 
 @router.message(CommandStart())
 async def start_cmd(message: Message):
@@ -564,19 +544,8 @@ async def start_cmd(message: Message):
         "Выбирай раздел ниже 👇",
         reply_markup=main_menu_kb(),
     )
-    await message.answer(
-        "⚖️ <b>Юридическая информация</b>\n\n"
-        "Ознакомиться с условиями оказания услуг, правилами возврата и офертой вы можете по ссылке ниже.\n\n"
-        f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n"
-        f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🌐 Наш сайт", url=WEBSITE_URL)],
-            [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)],
-            [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)],
-        ]),
-    )
 
-# ---------- ПРОФИЛЬ (С РЕФЕРАЛЬНОЙ СТАТИСТИКОЙ) ----------
+# ---------- ПРОФИЛЬ ----------
 @router.message(F.text == "👤 Профиль")
 async def profile_menu(message: Message):
     uid = message.from_user.id
@@ -585,7 +554,6 @@ async def profile_menu(message: Message):
     joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
     w_count, w_limit = wishlist_count(uid), wishlist_limit(uid)
     
-    # Реферальная статистика
     ref_count = db_query("SELECT COUNT(*) FROM users WHERE referred_by = ? AND ref_bonus_claimed = 1", (uid,), fetchone=True)[0]
     ref_earned_days = ref_count * REF_BONUS_DAYS
     
@@ -613,12 +581,11 @@ async def profile_menu(message: Message):
     
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ---------- ПРЕМИУМ (РЕФЕРАЛЬНАЯ СИСТЕМА) ----------
+# ---------- ПРЕМИУМ ----------
 async def premium_menu(message: Message, user_id: int | None = None):
     uid = user_id if user_id is not None else message.from_user.id
     is_prem = check_premium(uid)
     until = get_premium_until(uid)
-    
     ref_count = db_query("SELECT COUNT(*) FROM users WHERE referred_by = ? AND ref_bonus_claimed = 1", (uid,), fetchone=True)[0]
     
     status = ""
@@ -660,9 +627,7 @@ async def premium_show(cb: CallbackQuery):
     await cb.answer()
     if cb.message: await premium_menu(cb.message, user_id=cb.from_user.id)
 
-# ---------- ОСТАЛЬНЫЕ ХЕНДЛЕРЫ (Скидки, Рулетка, Wishlist, Пополнение, Мобилки, Админка) ----------
-# (Они остались без изменений, я вставил их ниже для полноты кода)
-
+# ---------- СКИДКИ ----------
 @router.message(F.text == "🔥 Скидки")
 async def discounts_menu(message: Message):
     products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
@@ -837,7 +802,7 @@ async def wl_show(cb: CallbackQuery):
         text += f"• {html.escape(title)}\n"
         buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {title[:25]}", callback_data=f"wl_del_{wid}")])
     if not check_premium(uid):
-        text += "\n💎 Хочешь до 10 игр + уведомления о скидках? Купи Премиум!"
+        text += "\n💎 Хочешь до 10 игр + уведомления о скидках? Пригласи друга!"
         buttons.append([InlineKeyboardButton(text="💎 Премиум", callback_data="premium_show")])
     try: await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except TelegramBadRequest: await cb.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -907,15 +872,28 @@ async def mobile_help(cb: CallbackQuery):
     await cb.answer()
     await cb.message.answer("❓ <b>Как пополнить мобильную игру</b>\n\n1️⃣ Нажми «Пополнить мобильные игры»\n2️⃣ Выбери свою игру из списка\n3️⃣ Введи <b>игровой ID</b> (не логин/пароль!)\n4️⃣ Выбери номинал (например, 60 гемов, 100 UC)\n5️⃣ Оплати картой\n\n⚠️ <b>Важно:</b> вводи только игровой ID!\n\n" f"Если что-то пошло не так — пиши {PLATI_SUPPORT}")
 
-# ---------- РЕКЛАМА ----------
+# ---------- РЕКЛАМА (ОБНОВЛЕНО) ----------
 @router.message(F.text == "📢 Реклама")
 async def ads_info(message: Message):
-    await message.answer("📢 <b>Реклама в нашем боте</b>\n\n🎯 Пост в рассылке, закреп, упоминание в «Скидке дня».\n\n" f"Пиши: 👉 <b>{CONTACT_TG}</b>", reply_markup=main_menu_kb())
+    await message.answer(
+        "📢 <b>Реклама в нашем боте</b>\n\n"
+        "Покупая рекламу, вы получаете <b>рассылку вашего рекламного поста всем пользователям нашего бота</b>.\n\n"
+        "🎯 Мы отправим ваше сообщение (текст + фото/видео) каждому пользователю бота.\n"
+        "📊 Вы получите охват всей нашей аудитории.\n\n"
+        f"Для заказа и уточнения цены пиши: 👉 <b>{CONTACT_TG}</b>",
+        reply_markup=main_menu_kb(),
+    )
 
-# ---------- ДОКУМЕНТЫ ----------
-@router.message(F.text == "⚖️ Документы")
-async def docs_info(message: Message):
-    await message.answer("⚖️ <b>Юридическая информация</b>\n\nОзнакомьтесь с документами перед использованием бота:\n\n" f"📞 <b>Контакты поддержки:</b> {CONTACT_TG} (email: {CONTACT_EMAIL})\n" f"🆔 <b>Реквизиты продавца:</b> Самозанятый, ИНН {INN}\n\nПравила возврата средств указаны в оферте.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🌐 Наш сайт", url=WEBSITE_URL)], [InlineKeyboardButton(text="📄 Публичная оферта", url=OFFER_URL)], [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_URL)]]))
+# ---------- ПОДДЕРЖКА ----------
+@router.message(F.text == "🆘 Поддержка")
+async def support_info(message: Message):
+    await message.answer(
+        "🆘 <b>Служба поддержки</b>\n\n"
+        f"📱 Telegram: {CONTACT_TG}\n"
+        f"✉️ Email: {CONTACT_EMAIL}\n\n"
+        "Напишите нам, если возникли вопросы по работе бота.",
+        reply_markup=main_menu_kb(),
+    )
 
 # ---------- АДМИНКА ----------
 @router.message(Command("admin"))
@@ -1086,7 +1064,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен с реферальной системой!")
+    logger.info("Бот запущен (без сайта и оферты, с реферальной системой)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
