@@ -476,65 +476,48 @@ class AdminBroadcastFSM(StatesGroup):
     waiting_message = State()
     waiting_confirm = State()
 
-# ---------- MIDDLEWARE ----------
-class UserSyncMiddleware:
-    async def __call__(self, handler, event, data):
-        user = None
-        if isinstance(event, Message): user = event.from_user
-        elif isinstance(event, CallbackQuery): user = event.from_user
-        if user is not None and not user.is_bot:
-            try: upsert_user(user.id, user.username, user.first_name)
-            except Exception: pass
-        return await handler(event, data)
-
 # ---------- ERROR HANDLER ----------
 async def errors_handler(event, exception: Exception, bot: Bot):
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
     return True
 
-# ---------- СТАРТ (С РЕФЕРАЛЬНОЙ СИСТЕМОЙ) ----------
-@router.message(CommandStart(deep_link=True))
-async def start_ref(message: Message, command: CommandObject):
+# ---------- СТАРТ (ИСПРАВЛЕННЫЙ) ----------
+@router.message(CommandStart())
+async def start_cmd(message: Message, command: CommandObject):
     referrer_id = None
     if command.args and command.args.startswith("ref_"):
         try:
             referrer_id = int(command.args.split("_")[1])
         except (ValueError, IndexError):
             pass
-    
+
+    # Проверяем, есть ли юзер в базе
     existing = db_query("SELECT user_id FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
     is_new = existing is None
-    
-    upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
-    
-    if is_new and referrer_id and referrer_id != message.from_user.id:
-        ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
-        if ref_row:
-            add_premium_days(referrer_id, REF_BONUS_DAYS)
-            db_query("UPDATE users SET ref_bonus_claimed = 1 WHERE user_id = ?", (message.from_user.id,))
-            try:
-                await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\nТебе начислено <b>+{REF_BONUS_DAYS} дней Премиума</b>! 👑")
-            except Exception: pass
-            await message.answer(f"✅ Ты пришел по реферальной ссылке! Твой друг получил <b>+{REF_BONUS_DAYS} дней Премиума</b>.")
-    
-    is_prem = check_premium(message.from_user.id)
-    premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
-    
-    await message.answer(
-        f"👋 Привет, {html.escape(message.from_user.first_name or 'друг')}!\n\n"
-        "🐷 Я бот для выгодных покупок.\n"
-        "🔥 Самые жирные скидки на Steam-игры.\n"
-        "💳 Пополнение Steam и мобильных игр напрямую в кошелёк.\n"
-        f"{premium_text}\n"
-        "Выбирай раздел ниже 👇",
-        reply_markup=main_menu_kb(),
-    )
 
-@router.message(CommandStart())
-async def start_cmd(message: Message):
-    upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    if is_new:
+        # Создаем нового юзера с реферером
+        db_query(
+            "INSERT INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)",
+            (message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
+        )
+        # Начисляем бонус рефереру
+        if referrer_id and referrer_id != message.from_user.id:
+            ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
+            if ref_row:
+                add_premium_days(referrer_id, REF_BONUS_DAYS)
+                db_query("UPDATE users SET ref_bonus_claimed = 1 WHERE user_id = ?", (message.from_user.id,))
+                try:
+                    await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\nТебе начислено <b>+{REF_BONUS_DAYS} дней Премиума</b>! 👑")
+                except Exception: pass
+                await message.answer(f"✅ Ты пришел по реферальной ссылке! Твой друг получил <b>+{REF_BONUS_DAYS} дней Премиума</b>.")
+    else:
+        # Обновляем данные, если юзер уже есть
+        db_query("UPDATE users SET username=?, first_name=? WHERE user_id=?", (message.from_user.username, message.from_user.first_name, message.from_user.id))
+
     is_prem = check_premium(message.from_user.id)
     premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
+    
     await message.answer(
         f"👋 Привет, {html.escape(message.from_user.first_name or 'друг')}!\n\n"
         "🐷 Я бот для выгодных покупок.\n"
@@ -621,7 +604,7 @@ async def premium_show(cb: CallbackQuery):
     await cb.answer()
     if cb.message: await premium_menu(cb.message, user_id=cb.from_user.id)
 
-# ---------- ССЫЛКА НА ДРУГА (ИСПРАВЛЕНО) ----------
+# ---------- ССЫЛКА НА ДРУГА ----------
 @router.callback_query(F.data == "show_ref_link")
 async def show_ref_link(cb: CallbackQuery):
     uid = cb.from_user.id
@@ -1060,8 +1043,7 @@ async def main():
     db_init()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
-    dp.message.middleware(UserSyncMiddleware())
-    dp.callback_query.middleware(UserSyncMiddleware())
+    # Убрали middleware, чтобы start_cmd срабатывал первым
     dp.include_router(router)
     dp.errors.register(errors_handler)
 
@@ -1074,7 +1056,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (с исправленной реферальной ссылкой)!")
+    logger.info("Бот запущен (исправленная реферальная система)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
