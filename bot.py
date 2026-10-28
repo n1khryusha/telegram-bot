@@ -15,7 +15,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -42,7 +42,7 @@ PLATI_SUPPORT = os.getenv("PLATI_SUPPORT", "@ObuzaMeduza")
 STEAM_TOPUP_ITEM_ID = os.getenv("STEAM_TOPUP_ITEM_ID", "3961593")
 
 # --- РЕФЕРАЛЬНАЯ СИСТЕМА ---
-REF_BONUS_DAYS = 7  # Сколько дней премиума даем за друга
+REF_BONUS_DAYS = 7
 
 # --- КОНТАКТЫ ---
 CONTACT_TG = "@ObuzaMeduza"
@@ -204,18 +204,6 @@ def escape_like(s: str) -> str:
 def normalize_title(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip())
 
-def upsert_user(user_id: int, username: str | None, first_name: str | None, referred_by: int | None = None):
-    if user_id is None:
-        return
-    row = db_query("SELECT user_id, referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if row:
-        db_query("UPDATE users SET username=?, first_name=? WHERE user_id=?", (username, first_name, user_id))
-    else:
-        db_query(
-            "INSERT INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)",
-            (user_id, username, first_name, referred_by)
-        )
-
 def check_premium(user_id: int) -> bool:
     res = db_query("SELECT premium_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
     if not res or not res[0]:
@@ -234,6 +222,7 @@ def add_premium_days(user_id: int, days: int):
     now = utcnow()
     new_expiry = (current + timedelta(days=days)) if (current and current > now) else (now + timedelta(days=days))
     db_query("UPDATE users SET premium_until = ? WHERE user_id = ?", (new_expiry.isoformat(), user_id))
+    logger.info(f"[PREMIUM] +{days} дней пользователю {user_id}. Новая дата: {new_expiry}")
 
 def wishlist_limit(user_id: int) -> int:
     return WISHLIST_LIMIT_PREMIUM if check_premium(user_id) else WISHLIST_LIMIT_FREE
@@ -455,7 +444,8 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🔄 Спарсить скидки"), KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="🎁 Выдать премиум"), KeyboardButton(text="🚫 Снять премиум")],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="⬅️ В меню")],
+            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="👥 Рефералы")],
+            [KeyboardButton(text="⬅️ В меню")],
         ],
         resize_keyboard=True,
     )
@@ -481,27 +471,29 @@ async def errors_handler(event, exception: Exception, bot: Bot):
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
     return True
 
-# ---------- СТАРТ (ИСПРАВЛЕННЫЙ) ----------
+# ---------- СТАРТ ----------
 @router.message(CommandStart())
-async def start_cmd(message: Message, command: CommandObject):
+async def start_cmd(message: Message):
+    text = message.text or ""
     referrer_id = None
-    if command.args and command.args.startswith("ref_"):
-        try:
-            referrer_id = int(command.args.split("_")[1])
-        except (ValueError, IndexError):
-            pass
+    
+    match = re.search(r"ref_(\d+)", text)
+    if match:
+        referrer_id = int(match.group(1))
+        logger.info(f"[START] Referrer ID from text: {referrer_id}")
 
-    # Проверяем, есть ли юзер в базе
-    existing = db_query("SELECT user_id FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
+    logger.info(f"[START] User: {message.from_user.id}, Text: {text}")
+
+    existing = db_query("SELECT user_id, referred_by FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
     is_new = existing is None
 
     if is_new:
-        # Создаем нового юзера с реферером
         db_query(
             "INSERT INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)",
             (message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
         )
-        # Начисляем бонус рефереру
+        logger.info(f"[START] New user created: {message.from_user.id}, referrer: {referrer_id}")
+        
         if referrer_id and referrer_id != message.from_user.id:
             ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
             if ref_row:
@@ -509,10 +501,12 @@ async def start_cmd(message: Message, command: CommandObject):
                 db_query("UPDATE users SET ref_bonus_claimed = 1 WHERE user_id = ?", (message.from_user.id,))
                 try:
                     await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\nТебе начислено <b>+{REF_BONUS_DAYS} дней Премиума</b>! 👑")
-                except Exception: pass
+                except Exception as e:
+                    logger.warning(f"[REF] Не удалось отправить сообщение рефереру: {e}")
                 await message.answer(f"✅ Ты пришел по реферальной ссылке! Твой друг получил <b>+{REF_BONUS_DAYS} дней Премиума</b>.")
+            else:
+                logger.warning(f"[REF] Referrer {referrer_id} not found in DB")
     else:
-        # Обновляем данные, если юзер уже есть
         db_query("UPDATE users SET username=?, first_name=? WHERE user_id=?", (message.from_user.username, message.from_user.first_name, message.from_user.id))
 
     is_prem = check_premium(message.from_user.id)
@@ -528,7 +522,7 @@ async def start_cmd(message: Message, command: CommandObject):
         reply_markup=main_menu_kb(),
     )
 
-# ---------- ПРОФИЛЬ ----------
+# ---------- ПРОФИЛЬ (СО СПИСКОМ ДРУЗЕЙ) ----------
 @router.message(F.text == "👤 Профиль")
 async def profile_menu(message: Message):
     uid = message.from_user.id
@@ -537,8 +531,12 @@ async def profile_menu(message: Message):
     joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
     w_count, w_limit = wishlist_count(uid), wishlist_limit(uid)
     
-    ref_count = db_query("SELECT COUNT(*) FROM users WHERE referred_by = ? AND ref_bonus_claimed = 1", (uid,), fetchone=True)[0]
-    ref_earned_days = ref_count * REF_BONUS_DAYS
+    # Получаем список приглашенных
+    refs = db_query(
+        "SELECT username, first_name FROM users WHERE referred_by = ? ORDER BY joined_at DESC LIMIT 20",
+        (uid,), fetch=True
+    )
+    ref_count = len(refs)
     
     text = f"👤 <b>Твой профиль</b>\n\n🆔 ID: <code>{uid}</code>\n"
     if joined and joined[0]: text += f"📅 С нами с: {joined[0][:10]}\n"
@@ -550,7 +548,15 @@ async def profile_menu(message: Message):
         text += "💎 Статус: <b>Обычный</b>\n"
     text += f"\n⭐ <b>Wishlist:</b> {w_count} / {w_limit} игр\n"
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
-    text += f"🎁 <b>Заработано дней Премиума:</b> {ref_earned_days}\n"
+    
+    # Вывод списка друзей
+    if refs:
+        text += "<b>Твои рефералы:</b>\n"
+        for uname, fname in refs:
+            name = f"@{uname}" if uname else (fname or "—")
+            text += f"• {html.escape(name)}\n"
+        if ref_count == 20:
+            text += "... (показаны последние 20)\n"
 
     buttons = [
         [InlineKeyboardButton(text="🎁 Пригласить друга (+7 дней)", callback_data="show_ref_link")],
@@ -923,6 +929,28 @@ async def stats(message: Message):
         if prem_count > 10: text_prem += f"  ... и ещё {prem_count - 10}\n"
     await message.answer(f"📊 <b>Статистика</b>\n\n👥 Всего юзеров: {users}\n🎮 Игр: {products}\n⭐ Wishlist записей: {wish}\n💳 Кликов Steam: {steam_clicks}\n📱 Кликов Mobile: {mobile_clicks}\n{text_prem}", reply_markup=admin_menu_kb())
 
+@router.message(F.text == "👥 Рефералы")
+async def admin_refs(message: Message):
+    if not is_admin(message.from_user.id): return
+    
+    rows = db_query("""
+        SELECT u.user_id, u.username, u.first_name, u.joined_at, u.referred_by, u.ref_bonus_claimed 
+        FROM users u 
+        WHERE u.referred_by IS NOT NULL 
+        ORDER BY u.joined_at DESC LIMIT 20
+    """, fetch=True)
+    
+    if not rows:
+        await message.answer("Пока нет пользователей, которые пришли по реферальным ссылкам.", reply_markup=admin_menu_kb())
+        return
+        
+    text = "👥 <b>Последние 20 рефералов:</b>\n\n"
+    for uid, uname, fname, joined, ref_by, claimed in rows:
+        status = "✅" if claimed else "⏳"
+        text += f"{status} <code>{uid}</code> | @{uname or '—'} | пришел от: <code>{ref_by}</code>\n"
+        
+    await message.answer(text, reply_markup=admin_menu_kb())
+
 @router.message(F.text == "🎁 Выдать премиум")
 async def admin_grant_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
@@ -1043,7 +1071,6 @@ async def main():
     db_init()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
-    # Убрали middleware, чтобы start_cmd срабатывал первым
     dp.include_router(router)
     dp.errors.register(errors_handler)
 
@@ -1056,7 +1083,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (исправленная реферальная система)!")
+    logger.info("Бот запущен (список рефералов в профиле)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
