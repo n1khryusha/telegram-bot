@@ -47,6 +47,9 @@ REF_BONUS_DAYS = 7
 # --- КОНТАКТЫ ---
 CONTACT_TG = "@ObuzaMeduza"
 CONTACT_EMAIL = "nikhrushawork@gmail.com"
+
+# --- ДОНАТ (DA LINK) ---
+DONATE_URL = "https://dalink.to/beaconkeys"
 # ===================================
 
 if not BOT_TOKEN:
@@ -448,8 +451,8 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра")],
             [KeyboardButton(text="💳 Пополнить Steam"), KeyboardButton(text="📱 Мобильные игры")],
             [KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="📢 Реклама")],
-            [KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="❤️ Поддержать")],
+            [KeyboardButton(text="📢 Реклама"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
     )
@@ -591,6 +594,7 @@ async def profile_menu(message: Message):
     buttons = [
         [InlineKeyboardButton(text="🎁 Пригласить друга (+7 дней)", callback_data="show_ref_link")],
         [InlineKeyboardButton(text="⭐ Мой Wishlist", callback_data="wl_show")],
+        [InlineKeyboardButton(text="❤️ Поддержать проект", url=DONATE_URL)],
     ]
     if w_count < w_limit:
         buttons.append([InlineKeyboardButton(text="➕ Добавить в Wishlist", callback_data="wl_add_start")])
@@ -679,7 +683,6 @@ async def user_promo_check(message: Message, state: FSMContext):
         await message.answer("⚠️ Введите код.")
         return
 
-    # Проверяем код
     promo = db_query("SELECT days, max_uses, uses_count FROM promocodes WHERE code = ?", (code,), fetchone=True)
     if not promo:
         await message.answer("❌ Такого промокода не существует.")
@@ -690,13 +693,11 @@ async def user_promo_check(message: Message, state: FSMContext):
         await message.answer("❌ Этот промокод больше не действителен (лимит использований исчерпан).")
         return
     
-    # Проверяем, не использовал ли уже юзер
     already = db_query("SELECT 1 FROM promocode_uses WHERE code = ? AND user_id = ?", (code, message.from_user.id), fetchone=True)
     if already:
         await message.answer("❌ Вы уже использовали этот промокод.")
         return
 
-    # Активируем
     db_query("UPDATE promocodes SET uses_count = uses_count + 1 WHERE code = ?", (code,))
     db_query("INSERT INTO promocode_uses (code, user_id) VALUES (?, ?)", (code, message.from_user.id))
     add_premium_days(message.from_user.id, days)
@@ -970,6 +971,21 @@ async def ads_info(message: Message):
         reply_markup=main_menu_kb(),
     )
 
+# ---------- ДОНАТ (ПОДДЕРЖАТЬ) ----------
+@router.message(F.text == "❤️ Поддержать")
+async def donate_info(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Сделать донат", url=DONATE_URL)],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="close_msg")]
+    ])
+    await message.answer(
+        "❤️ <b>Поддержать проект</b>\n\n"
+        "Если наш бот помогает тебе экономить на играх, ты можешь отблагодарить разработчика!\n\n"
+        "Твой донат пойдет на оплату сервера и развитие бота.\n\n"
+        "Спасибо за поддержку! 🙏",
+        reply_markup=kb,
+    )
+
 # ---------- ПОДДЕРЖКА ----------
 @router.message(F.text == "🆘 Поддержка")
 async def support_info(message: Message):
@@ -1079,7 +1095,6 @@ async def admin_promo_create_code(message: Message, state: FSMContext):
         await message.answer("⚠️ Код не должен содержать пробелов. Попробуйте снова.")
         return
         
-    # Проверка на существование
     existing = db_query("SELECT 1 FROM promocodes WHERE code = ?", (code,), fetchone=True)
     if existing:
         await message.answer("⚠️ Такой промокод уже существует. Введите другой.")
@@ -1298,7 +1313,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (промокоды + рефералы)!")
+    logger.info("Бот запущен (промокоды, рефералы, донат)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
