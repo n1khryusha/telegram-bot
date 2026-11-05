@@ -151,6 +151,20 @@ def db_init():
         notified_at TEXT DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, product_id)
     );
+    CREATE TABLE IF NOT EXISTS promocodes (
+        code TEXT PRIMARY KEY,
+        days INTEGER NOT NULL,
+        max_uses INTEGER DEFAULT 1,
+        uses_count INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS promocode_uses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT,
+        user_id INTEGER,
+        used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(code, user_id)
+    );
     CREATE INDEX IF NOT EXISTS idx_products_discount ON products(discount);
     CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until);
     """)
@@ -434,7 +448,8 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра")],
             [KeyboardButton(text="💳 Пополнить Steam"), KeyboardButton(text="📱 Мобильные игры")],
             [KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="📢 Реклама"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="📢 Реклама")],
+            [KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
     )
@@ -444,8 +459,17 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🔄 Спарсить скидки"), KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="🎁 Выдать премиум"), KeyboardButton(text="🚫 Снять премиум")],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="👥 Рефералы")],
-            [KeyboardButton(text="⬅️ В меню")],
+            [KeyboardButton(text="🎟 Промокоды"), KeyboardButton(text="👥 Рефералы")],
+            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="⬅️ В меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+def promo_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Создать промокод"), KeyboardButton(text="📋 Список промокодов")],
+            [KeyboardButton(text="⬅️ Назад в админку")],
         ],
         resize_keyboard=True,
     )
@@ -465,6 +489,14 @@ class AdminPremiumFSM(StatesGroup):
 class AdminBroadcastFSM(StatesGroup):
     waiting_message = State()
     waiting_confirm = State()
+
+class PromoFSM(StatesGroup):
+    waiting_code = State()
+    waiting_days = State()
+    waiting_max_uses = State()
+
+class UserPromoFSM(StatesGroup):
+    waiting_code = State()
 
 # ---------- ERROR HANDLER ----------
 async def errors_handler(event, exception: Exception, bot: Bot):
@@ -522,7 +554,7 @@ async def start_cmd(message: Message):
         reply_markup=main_menu_kb(),
     )
 
-# ---------- ПРОФИЛЬ (СО СПИСКОМ ДРУЗЕЙ) ----------
+# ---------- ПРОФИЛЬ ----------
 @router.message(F.text == "👤 Профиль")
 async def profile_menu(message: Message):
     uid = message.from_user.id
@@ -531,7 +563,6 @@ async def profile_menu(message: Message):
     joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
     w_count, w_limit = wishlist_count(uid), wishlist_limit(uid)
     
-    # Получаем список приглашенных
     refs = db_query(
         "SELECT username, first_name FROM users WHERE referred_by = ? ORDER BY joined_at DESC LIMIT 20",
         (uid,), fetch=True
@@ -549,7 +580,6 @@ async def profile_menu(message: Message):
     text += f"\n⭐ <b>Wishlist:</b> {w_count} / {w_limit} игр\n"
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
     
-    # Вывод списка друзей
     if refs:
         text += "<b>Твои рефералы:</b>\n"
         for uname, fname in refs:
@@ -625,6 +655,63 @@ async def show_ref_link(cb: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
     await cb.answer()
+
+# ---------- ВВОД ПРОМОКОДА (ЮЗЕР) ----------
+@router.message(F.text == "🎟 Промокод")
+async def user_promo_start(message: Message, state: FSMContext):
+    await state.set_state(UserPromoFSM.waiting_code)
+    await message.answer(
+        "🎟 <b>Введите промокод</b>\n\n"
+        "Отправьте сообщение с вашим промокодом, чтобы получить Премиум.\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(UserPromoFSM.waiting_code)
+async def user_promo_check(message: Message, state: FSMContext):
+    code = (message.text or "").strip().upper()
+    if code in ("ОТМЕНА", "CANCEL", "/CANCEL"):
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
+        return
+    
+    if not code:
+        await message.answer("⚠️ Введите код.")
+        return
+
+    # Проверяем код
+    promo = db_query("SELECT days, max_uses, uses_count FROM promocodes WHERE code = ?", (code,), fetchone=True)
+    if not promo:
+        await message.answer("❌ Такого промокода не существует.")
+        return
+    
+    days, max_uses, uses_count = promo
+    if uses_count >= max_uses:
+        await message.answer("❌ Этот промокод больше не действителен (лимит использований исчерпан).")
+        return
+    
+    # Проверяем, не использовал ли уже юзер
+    already = db_query("SELECT 1 FROM promocode_uses WHERE code = ? AND user_id = ?", (code, message.from_user.id), fetchone=True)
+    if already:
+        await message.answer("❌ Вы уже использовали этот промокод.")
+        return
+
+    # Активируем
+    db_query("UPDATE promocodes SET uses_count = uses_count + 1 WHERE code = ?", (code,))
+    db_query("INSERT INTO promocode_uses (code, user_id) VALUES (?, ?)", (code, message.from_user.id))
+    add_premium_days(message.from_user.id, days)
+    
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Промокод активирован!</b>\n\n"
+        f"Вам начислено <b>+{days} дней Премиума</b>! 👑",
+        reply_markup=main_menu_kb()
+    )
+
+@router.message(UserPromoFSM.waiting_code, F.text == "⬅️ Отмена")
+async def user_promo_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
 
 # ---------- СКИДКИ ----------
 @router.message(F.text == "🔥 Скидки")
@@ -951,6 +1038,134 @@ async def admin_refs(message: Message):
         
     await message.answer(text, reply_markup=admin_menu_kb())
 
+# ---------- УПРАВЛЕНИЕ ПРОМОКОДАМИ (АДМИН) ----------
+@router.message(F.text == "🎟 Промокоды")
+async def admin_promo_menu(message: Message):
+    if not is_admin(message.from_user.id): return
+    await message.answer(
+        "🎟 <b>Управление промокодами</b>\n\n"
+        "Здесь вы можете создавать новые промокоды и смотреть список существующих.",
+        reply_markup=promo_menu_kb()
+    )
+
+@router.message(F.text == "⬅️ Назад в админку")
+async def admin_promo_back(message: Message, state: FSMContext):
+    await state.clear()
+    if not is_admin(message.from_user.id): return
+    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu_kb())
+
+@router.message(F.text == "➕ Создать промокод")
+async def admin_promo_create_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.set_state(PromoFSM.waiting_code)
+    await message.answer(
+        "➕ <b>Создание промокода</b>\n\n"
+        "Введите название промокода (например, <code>WELCOME2026</code>).\n"
+        "Он будет автоматически приведен к верхнему регистру.\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(PromoFSM.waiting_code)
+async def admin_promo_create_code(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+        return
+    
+    code = (message.text or "").strip().upper()
+    if not code or " " in code:
+        await message.answer("⚠️ Код не должен содержать пробелов. Попробуйте снова.")
+        return
+        
+    # Проверка на существование
+    existing = db_query("SELECT 1 FROM promocodes WHERE code = ?", (code,), fetchone=True)
+    if existing:
+        await message.answer("⚠️ Такой промокод уже существует. Введите другой.")
+        return
+        
+    await state.update_data(code=code)
+    await state.set_state(PromoFSM.waiting_days)
+    await message.answer(
+        f"Код: <b>{code}</b>\n\n"
+        "На сколько <b>дней</b> Премиума рассчитан этот код? (например, 7)\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(PromoFSM.waiting_days)
+async def admin_promo_create_days(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+        return
+    
+    raw = (message.text or "").strip()
+    if not is_ascii_digits(raw) or int(raw) <= 0 or int(raw) > 3650:
+        await message.answer("⚠️ Введите число дней от 1 до 3650.")
+        return
+        
+    await state.update_data(days=int(raw))
+    await state.set_state(PromoFSM.waiting_max_uses)
+    await message.answer(
+        "Сколько раз можно использовать этот промокод? (например, 1 для одноразового или 100 для массового)\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(PromoFSM.waiting_max_uses)
+async def admin_promo_create_max_uses(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+        return
+    
+    raw = (message.text or "").strip()
+    if not is_ascii_digits(raw) or int(raw) <= 0:
+        await message.answer("⚠️ Введите число больше 0.")
+        return
+        
+    max_uses = int(raw)
+    data = await state.get_data()
+    code = data.get("code")
+    days = data.get("days")
+    
+    db_query("INSERT INTO promocodes (code, days, max_uses) VALUES (?, ?, ?)", (code, days, max_uses))
+    await state.clear()
+    
+    await message.answer(
+        f"✅ <b>Промокод создан!</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"Дней Премиума: <b>{days}</b>\n"
+        f"Максимум использований: <b>{max_uses}</b>",
+        reply_markup=promo_menu_kb()
+    )
+
+@router.message(F.text == "📋 Список промокодов")
+async def admin_promo_list(message: Message):
+    if not is_admin(message.from_user.id): return
+    rows = db_query("SELECT code, days, max_uses, uses_count FROM promocodes ORDER BY created_at DESC LIMIT 20", fetch=True)
+    if not rows:
+        await message.answer("Промокодов пока нет.", reply_markup=promo_menu_kb())
+        return
+        
+    text = "🎟 <b>Последние 20 промокодов:</b>\n\n"
+    for code, days, max_uses, uses_count in rows:
+        status = "✅" if uses_count < max_uses else "❌"
+        text += f"{status} <code>{code}</code> | {days} дн. | {uses_count}/{max_uses}\n"
+        
+    await message.answer(text, reply_markup=promo_menu_kb())
+
+@router.message(PromoFSM.waiting_code, F.text == "⬅️ Отмена")
+async def admin_promo_cancel_code(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+
+# ---------- ВЫДАЧА/СНЯТИЕ ПРЕМИУМА (АДМИН) ----------
 @router.message(F.text == "🎁 Выдать премиум")
 async def admin_grant_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
@@ -1083,7 +1298,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (список рефералов в профиле)!")
+    logger.info("Бот запущен (промокоды + рефералы)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
