@@ -331,14 +331,28 @@ async def _steam_get_details(session, app_id):
     return result
 
 def _format_price(price_overview) -> tuple[str, str, str]:
-    if not price_overview: return "", "", ""
+    if not price_overview:
+        return "", "", ""
+    currency = price_overview.get("currency", "")
     final = price_overview.get("final", 0) / 100
     initial = price_overview.get("initial", 0) / 100
     discount = price_overview.get("discount_percent", 0)
-    final_str = f"{final:.0f} ₽"
-    if discount:
-        return final_str, f"{initial:.0f} ₽", f"-{discount}%"
-    return final_str, "", ""
+    
+    if currency == "RUB":
+        final_str = f"{final:.0f} ₽"
+        original_str = f"{initial:.0f} ₽" if discount else ""
+        discount_str = f"-{discount}%" if discount else ""
+    elif currency == "USD":
+        final_str = f"${final:.2f}"
+        original_str = f"${initial:.2f}" if discount else ""
+        discount_str = f"-{discount}%" if discount else ""
+    else:
+        # Для других валют просто отдаем как есть
+        final_str = f"{final:.2f} {currency}"
+        original_str = f"{initial:.2f} {currency}" if discount else ""
+        discount_str = f"-{discount}%" if discount else ""
+        
+    return final_str, original_str, discount_str
 
 async def fetch_steam_deals():
     url = "https://store.steampowered.com/api/featuredcategories?cc=ru&l=russian"
@@ -363,9 +377,10 @@ async def fetch_steam_deals():
             if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
             det = await _steam_get_details(session, app_id)
             shop_url = f"https://store.steampowered.com/app/{app_id}/"
+            f_str, o_str, d_str = _format_price(det["price_overview"])
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
             db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (title, f"{final_price_rub:.0f} ₽", f"{original_price_rub:.0f} ₽", f"-{discount_percent}%", shop_url, det["image"], det["description"], price_usd))
+                (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
             added += 1
             await asyncio.sleep(0.2)
         for section_key in ("top_sellers", "new_releases"):
@@ -1313,7 +1328,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (промокоды, рефералы, донат)!")
+    logger.info("Бот запущен (с исправлением цен)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
