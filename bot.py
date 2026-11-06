@@ -347,7 +347,6 @@ def _format_price(price_overview) -> tuple[str, str, str]:
         original_str = f"${initial:.2f}" if discount else ""
         discount_str = f"-{discount}%" if discount else ""
     else:
-        # Для других валют просто отдаем как есть
         final_str = f"{final:.2f} {currency}"
         original_str = f"{initial:.2f} {currency}" if discount else ""
         discount_str = f"-{discount}%" if discount else ""
@@ -682,13 +681,21 @@ async def user_promo_start(message: Message, state: FSMContext):
     await message.answer(
         "🎟 <b>Введите промокод</b>\n\n"
         "Отправьте сообщение с вашим промокодом, чтобы получить Премиум.\n\n"
-        "<i>Напишите «отмена», чтобы выйти.</i>",
+        "<i>Напишите «отмена» или нажмите кнопку ниже, чтобы выйти.</i>",
         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
     )
+
+# Обработчик для кнопки "Отмена" (и текста "отмена")
+@router.message(UserPromoFSM.waiting_code, F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
+async def user_promo_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Ввод промокода отменен.", reply_markup=main_menu_kb())
 
 @router.message(UserPromoFSM.waiting_code)
 async def user_promo_check(message: Message, state: FSMContext):
     code = (message.text or "").strip().upper()
+    
+    # На всякий случай проверяем еще раз
     if code in ("ОТМЕНА", "CANCEL", "/CANCEL"):
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
@@ -700,7 +707,7 @@ async def user_promo_check(message: Message, state: FSMContext):
 
     promo = db_query("SELECT days, max_uses, uses_count FROM promocodes WHERE code = ?", (code,), fetchone=True)
     if not promo:
-        await message.answer("❌ Такого промокода не существует.")
+        await message.answer("❌ Такого промокода не существует. Попробуйте еще раз или нажмите «Отмена».")
         return
     
     days, max_uses, uses_count = promo
@@ -723,11 +730,6 @@ async def user_promo_check(message: Message, state: FSMContext):
         f"Вам начислено <b>+{days} дней Премиума</b>! 👑",
         reply_markup=main_menu_kb()
     )
-
-@router.message(UserPromoFSM.waiting_code, F.text == "⬅️ Отмена")
-async def user_promo_cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
 
 # ---------- СКИДКИ ----------
 @router.message(F.text == "🔥 Скидки")
@@ -1328,7 +1330,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (с исправлением цен)!")
+    logger.info("Бот запущен (с исправлением кнопки отмены)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
@@ -1336,4 +1338,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
+    
