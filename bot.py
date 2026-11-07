@@ -43,7 +43,7 @@ PLATI_SUPPORT = os.getenv("PLATI_SUPPORT", "@ObuzaMeduza")
 STEAM_TOPUP_ITEM_ID = os.getenv("STEAM_TOPUP_ITEM_ID", "3961593")
 
 # --- РЕФЕРАЛЬНАЯ СИСТЕМА ---
-REF_BONUS_DAYS = 3  # <--- ИЗМЕНЕНО НА 3 ДНЯ
+REF_BONUS_DAYS = 3
 
 # --- КОНТАКТЫ ---
 CONTACT_TG = "@ObuzaMeduza"
@@ -53,8 +53,10 @@ CONTACT_EMAIL = "nikhrushawork@gmail.com"
 DONATE_URL = "https://dalink.to/beaconkeys"
 
 # --- ЦЕНЫ В ЗВЕЗДАХ ---
-STARS_7_DAYS = 150  # 150 звезд за 7 дней
-STARS_30_DAYS = 350 # 350 звезд за 30 дней
+STARS_7_DAYS   = 150    # 7 дней
+STARS_30_DAYS  = 350    # 30 дней
+STARS_180_DAYS = 1500   # 6 месяцев (180 дней)
+STARS_365_DAYS = 2500   # 1 год (365 дней)
 # ===================================
 
 if not BOT_TOKEN:
@@ -192,7 +194,7 @@ def db_init():
         cur.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
     if "ref_bonus_claimed" not in cols:
         cur.execute("ALTER TABLE users ADD COLUMN ref_bonus_claimed INTEGER DEFAULT 0")
-    
+
     cur.execute("PRAGMA table_info(products)")
     cols = {row[1] for row in cur.fetchall()}
     if "tg_file_id" not in cols:
@@ -350,7 +352,7 @@ def _format_price(price_overview) -> tuple[str, str, str]:
     final = price_overview.get("final", 0) / 100
     initial = price_overview.get("initial", 0) / 100
     discount = price_overview.get("discount_percent", 0)
-    
+
     if currency == "RUB":
         final_str = f"{final:.0f} ₽"
         original_str = f"{initial:.0f} ₽" if discount else ""
@@ -376,23 +378,23 @@ async def fetch_steam_deals():
     except Exception as e:
         logger.warning(f"[PARSER] {e}")
         return
-    
+
     added = 0
     async with aiohttp.ClientSession() as session:
         for item in data.get("specials", {}).get("items", []):
             title, app_id = item.get("name"), item.get("id")
             if not title or not app_id: continue
-            
+
             det = await _steam_get_details(session, app_id)
             if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
                 continue
-            
+
             if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
-            
+
             shop_url = f"https://store.steampowered.com/app/{app_id}/"
             f_str, o_str, d_str = _format_price(det["price_overview"])
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
-            
+
             db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
             added += 1
@@ -402,17 +404,17 @@ async def fetch_steam_deals():
             for item in data.get(section_key, {}).get("items", []):
                 title, app_id = item.get("name"), item.get("id")
                 if not title or not app_id: continue
-                
+
                 det = await _steam_get_details(session, app_id)
                 if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
                     continue
-                
+
                 if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
-                
+
                 shop_url = f"https://store.steampowered.com/app/{app_id}/"
                 f_str, o_str, d_str = _format_price(det["price_overview"])
                 price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
-                
+
                 db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
                 added += 1
@@ -548,7 +550,7 @@ async def errors_handler(event, exception: Exception, bot: Bot):
 async def start_cmd(message: Message):
     text = message.text or ""
     referrer_id = None
-    
+
     match = re.search(r"ref_(\d+)", text)
     if match:
         referrer_id = int(match.group(1))
@@ -565,17 +567,17 @@ async def start_cmd(message: Message):
             (message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
         )
         logger.info(f"[START] New user created: {message.from_user.id}, referrer: {referrer_id}")
-        
+
         if referrer_id and referrer_id != message.from_user.id:
             ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
             if ref_row:
                 add_premium_days(referrer_id, REF_BONUS_DAYS)
                 db_query("UPDATE users SET ref_bonus_claimed = 1 WHERE user_id = ?", (message.from_user.id,))
                 try:
-                    await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\nТебе начислено <b>+{REF_BONUS_DAYS} дней Премиума</b>! 👑")
+                    await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\nТебе начислено <b>+{REF_BONUS_DAYS} дня Премиума</b>! 👑")
                 except Exception as e:
                     logger.warning(f"[REF] Не удалось отправить сообщение рефереру: {e}")
-                await message.answer(f"✅ Ты пришел по реферальной ссылке! Твой друг получил <b>+{REF_BONUS_DAYS} дней Премиума</b>.")
+                await message.answer(f"✅ Ты пришел по реферальной ссылке! Твой друг получил <b>+{REF_BONUS_DAYS} дня Премиума</b>.")
             else:
                 logger.warning(f"[REF] Referrer {referrer_id} not found in DB")
     else:
@@ -583,7 +585,7 @@ async def start_cmd(message: Message):
 
     is_prem = check_premium(message.from_user.id)
     premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
-    
+
     await message.answer(
         f"👋 Привет, {html.escape(message.from_user.first_name or 'друг')}!\n\n"
         "🐷 Я бот для выгодных покупок.\n"
@@ -602,13 +604,13 @@ async def profile_menu(message: Message):
     until = get_premium_until(uid)
     joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
     w_count, w_limit = wishlist_count(uid), wishlist_limit(uid)
-    
+
     refs = db_query(
         "SELECT username, first_name FROM users WHERE referred_by = ? ORDER BY joined_at DESC LIMIT 20",
         (uid,), fetch=True
     )
     ref_count = len(refs)
-    
+
     text = f"👤 <b>Твой профиль</b>\n\n🆔 ID: <code>{uid}</code>\n"
     if joined and joined[0]: text += f"📅 С нами с: {joined[0][:10]}\n"
     text += "\n"
@@ -619,7 +621,7 @@ async def profile_menu(message: Message):
         text += "💎 Статус: <b>Обычный</b>\n"
     text += f"\n⭐ <b>Wishlist:</b> {w_count} / {w_limit} игр\n"
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
-    
+
     if refs:
         text += "<b>Твои рефералы:</b>\n"
         for uname, fname in refs:
@@ -629,13 +631,13 @@ async def profile_menu(message: Message):
             text += "... (показаны последние 20)\n"
 
     buttons = [
-        [InlineKeyboardButton(text=f"🎁 Пригласить друга (+{REF_BONUS_DAYS} дней)", callback_data="show_ref_link")],
+        [InlineKeyboardButton(text="🎁 Пригласить друга (+3 дня)", callback_data="show_ref_link")],
         [InlineKeyboardButton(text="⭐ Мой Wishlist", callback_data="wl_show")],
         [InlineKeyboardButton(text="❤️ Поддержать проект", url=DONATE_URL)],
     ]
     if w_count < w_limit:
         buttons.append([InlineKeyboardButton(text="➕ Добавить в Wishlist", callback_data="wl_add_start")])
-    
+
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 # ---------- ПРЕМИУМ (С ОПЛАТОЙ ЗВЕЗДАМИ) ----------
@@ -644,7 +646,7 @@ async def premium_menu(message: Message, user_id: int | None = None):
     is_prem = check_premium(uid)
     until = get_premium_until(uid)
     ref_count = db_query("SELECT COUNT(*) FROM users WHERE referred_by = ? AND ref_bonus_claimed = 1", (uid,), fetchone=True)[0]
-    
+
     status = ""
     if is_prem and until:
         status = f"👑 <b>Твой Премиум активен до {until.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
@@ -662,15 +664,17 @@ async def premium_menu(message: Message, user_id: int | None = None):
         "🔔 <b>Мгновенные алерты</b>\n"
         "   <i>Персональные уведомления, как только на игру из Wishlist появляется скидка или цена падает ниже 80%.</i>\n\n"
         "🎁 <b>Как получить Премиум БЕСПЛАТНО?</b>\n"
-        f"Пригласи друга по своей ссылке и получи <b>+{REF_BONUS_DAYS} дней Премиума</b> за каждого!\n\n"
+        f"Пригласи друга по своей ссылке и получи <b>+{REF_BONUS_DAYS} дня Премиума</b> за каждого!\n\n"
         f"👥 Ты уже пригласил: <b>{ref_count} чел.</b>\n"
     )
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🔥 7 дней — {STARS_7_DAYS} ⭐", callback_data="buy_premium_7")],
         [InlineKeyboardButton(text=f"👑 30 дней — {STARS_30_DAYS} ⭐", callback_data="buy_premium_30")],
+        [InlineKeyboardButton(text=f"💎 6 месяцев — {STARS_180_DAYS} ⭐", callback_data="buy_premium_180")],
+        [InlineKeyboardButton(text=f"🏆 1 год — {STARS_365_DAYS} ⭐", callback_data="buy_premium_365")],
     ])
-    
+
     await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 @router.message(F.text == "💎 Премиум")
@@ -685,20 +689,33 @@ async def premium_show(cb: CallbackQuery):
 # ---------- ОПЛАТА ЗВЕЗДАМИ (TELEGRAM STARS) ----------
 @router.callback_query(F.data.startswith("buy_premium_"))
 async def buy_premium_stars(cb: CallbackQuery):
-    days = 7 if cb.data == "buy_premium_7" else 30
-    price = STARS_7_DAYS if days == 7 else STARS_30_DAYS
-    
-    # Формируем счет
+    try:
+        days = int(cb.data.rsplit("_", 1)[1])
+    except (ValueError, IndexError):
+        await cb.answer("Ошибка тарифа", show_alert=True)
+        return
+
+    price_map = {
+        7:   STARS_7_DAYS,
+        30:  STARS_30_DAYS,
+        180: STARS_180_DAYS,
+        365: STARS_365_DAYS,
+    }
+    price = price_map.get(days)
+    if not price:
+        await cb.answer("Неизвестный тариф", show_alert=True)
+        return
+
     prices = [LabeledPrice(label=f"Премиум на {days} дней", amount=price)]
-    
+
     try:
         await cb.bot.send_invoice(
             chat_id=cb.from_user.id,
             title=f"Премиум-доступ на {days} дней",
             description=f"Активация Премиум-доступа в боте BeaconKeys на {days} дней.",
             payload=f"premium_{days}",
-            provider_token="",  # Для Stars provider_token пустой!
-            currency="XTR",     # XTR - это код валюты Telegram Stars
+            provider_token="",   # Для Stars — пустой
+            currency="XTR",      # XTR — код валюты Telegram Stars
             prices=prices,
             start_parameter="premium",
         )
@@ -710,7 +727,6 @@ async def buy_premium_stars(cb: CallbackQuery):
 # ---------- ПРОВЕРКА ПЕРЕД ОПЛАТОЙ ----------
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
-    # Подтверждаем готовность принять платеж
     await pre_checkout_q.answer(ok=True)
 
 # ---------- УСПЕШНАЯ ОПЛАТА ----------
@@ -718,14 +734,14 @@ async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
 async def successful_payment_handler(message: Message):
     payment_info: SuccessfulPayment = message.successful_payment
     payload = payment_info.invoice_payload  # Например, "premium_7"
-    
+
     try:
         days = int(payload.split("_")[1])
     except (IndexError, ValueError):
-        days = 7 # По умолчанию
+        days = 7
 
     add_premium_days(message.from_user.id, days)
-    
+
     await message.answer(
         f"✅ <b>Оплата прошла успешно!</b>\n\n"
         f"Вам начислено <b>+{days} дней Премиума</b>! 👑\n\n"
@@ -740,12 +756,12 @@ async def show_ref_link(cb: CallbackQuery):
     uid = cb.from_user.id
     bot_info = await cb.bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
-    
+
     await cb.message.answer(
         f"🔗 <b>Твоя реферальная ссылка:</b>\n\n"
         f"<code>{ref_link}</code>\n\n"
         f"<i>Нажми на ссылку, чтобы скопировать её, и отправь другу.</i>\n\n"
-        f"За каждого друга, который зайдет по ней, ты получишь <b>+{REF_BONUS_DAYS} дней Премиума</b>!",
+        f"За каждого друга, который зайдет по ней, ты получишь <b>+{REF_BONUS_DAYS} дня Премиума</b>!",
         parse_mode=ParseMode.HTML
     )
     await cb.answer()
@@ -769,12 +785,12 @@ async def user_promo_cancel(message: Message, state: FSMContext):
 @router.message(UserPromoFSM.waiting_code)
 async def user_promo_check(message: Message, state: FSMContext):
     code = (message.text or "").strip().upper()
-    
+
     if code in ("ОТМЕНА", "CANCEL", "/CANCEL"):
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
         return
-    
+
     if not code:
         await message.answer("⚠️ Введите код.")
         return
@@ -783,12 +799,12 @@ async def user_promo_check(message: Message, state: FSMContext):
     if not promo:
         await message.answer("❌ Такого промокода не существует. Попробуйте еще раз или нажмите «Отмена».")
         return
-    
+
     days, max_uses, uses_count = promo
     if uses_count >= max_uses:
         await message.answer("❌ Этот промокод больше не действителен (лимит использований исчерпан).")
         return
-    
+
     already = db_query("SELECT 1 FROM promocode_uses WHERE code = ? AND user_id = ?", (code, message.from_user.id), fetchone=True)
     if already:
         await message.answer("❌ Вы уже использовали этот промокод.")
@@ -797,7 +813,7 @@ async def user_promo_check(message: Message, state: FSMContext):
     db_query("UPDATE promocodes SET uses_count = uses_count + 1 WHERE code = ?", (code,))
     db_query("INSERT INTO promocode_uses (code, user_id) VALUES (?, ?)", (code, message.from_user.id))
     add_premium_days(message.from_user.id, days)
-    
+
     await state.clear()
     await message.answer(
         f"✅ <b>Промокод активирован!</b>\n\n"
@@ -1132,4 +1148,289 @@ async def stats(message: Message):
 @router.message(F.text == "👥 Рефералы")
 async def admin_refs(message: Message):
     if not is_admin(message.from_user.id): return
-    
+
+    rows = db_query("""
+        SELECT u.user_id, u.username, u.first_name, u.joined_at, u.referred_by, u.ref_bonus_claimed
+        FROM users u
+        WHERE u.referred_by IS NOT NULL
+        ORDER BY u.joined_at DESC LIMIT 20
+    """, fetch=True)
+
+    if not rows:
+        await message.answer("Пока нет пользователей, которые пришли по реферальным ссылкам.", reply_markup=admin_menu_kb())
+        return
+
+    text = "👥 <b>Последние 20 рефералов:</b>\n\n"
+    for uid, uname, fname, joined, ref_by, claimed in rows:
+        status = "✅" if claimed else "⏳"
+        text += f"{status} <code>{uid}</code> | @{uname or '—'} | пришел от: <code>{ref_by}</code>\n"
+
+    await message.answer(text, reply_markup=admin_menu_kb())
+
+# ---------- УПРАВЛЕНИЕ ПРОМОКОДАМИ (АДМИН) ----------
+@router.message(F.text == "🎟 Промокоды")
+async def admin_promo_menu(message: Message):
+    if not is_admin(message.from_user.id): return
+    await message.answer(
+        "🎟 <b>Управление промокодами</b>\n\n"
+        "Здесь вы можете создавать новые промокоды и смотреть список существующих.",
+        reply_markup=promo_menu_kb()
+    )
+
+@router.message(F.text == "⬅️ Назад в админку")
+async def admin_promo_back(message: Message, state: FSMContext):
+    await state.clear()
+    if not is_admin(message.from_user.id): return
+    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu_kb())
+
+@router.message(F.text == "➕ Создать промокод")
+async def admin_promo_create_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.set_state(PromoFSM.waiting_code)
+    await message.answer(
+        "➕ <b>Создание промокода</b>\n\n"
+        "Введите название промокода (например, <code>WELCOME2026</code>).\n"
+        "Он будет автоматически приведен к верхнему регистру.\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(PromoFSM.waiting_code)
+async def admin_promo_create_code(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+        return
+
+    code = (message.text or "").strip().upper()
+    if not code or " " in code:
+        await message.answer("⚠️ Код не должен содержать пробелов. Попробуйте снова.")
+        return
+
+    existing = db_query("SELECT 1 FROM promocodes WHERE code = ?", (code,), fetchone=True)
+    if existing:
+        await message.answer("⚠️ Такой промокод уже существует. Введите другой.")
+        return
+
+    await state.update_data(code=code)
+    await state.set_state(PromoFSM.waiting_days)
+    await message.answer(
+        f"Код: <b>{code}</b>\n\n"
+        "На сколько <b>дней</b> Премиума рассчитан этот код? (например, 7)\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(PromoFSM.waiting_days)
+async def admin_promo_create_days(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+        return
+
+    raw = (message.text or "").strip()
+    if not is_ascii_digits(raw) or int(raw) <= 0 or int(raw) > 3650:
+        await message.answer("⚠️ Введите число дней от 1 до 3650.")
+        return
+
+    await state.update_data(days=int(raw))
+    await state.set_state(PromoFSM.waiting_max_uses)
+    await message.answer(
+        "Сколько раз можно использовать этот промокод? (например, 1 для одноразового или 100 для массового)\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
+    )
+
+@router.message(PromoFSM.waiting_max_uses)
+async def admin_promo_create_max_uses(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+        return
+
+    raw = (message.text or "").strip()
+    if not is_ascii_digits(raw) or int(raw) <= 0:
+        await message.answer("⚠️ Введите число больше 0.")
+        return
+
+    max_uses = int(raw)
+    data = await state.get_data()
+    code = data.get("code")
+    days = data.get("days")
+
+    db_query("INSERT INTO promocodes (code, days, max_uses) VALUES (?, ?, ?)", (code, days, max_uses))
+    await state.clear()
+
+    await message.answer(
+        f"✅ <b>Промокод создан!</b>\n\n"
+        f"Код: <code>{code}</code>\n"
+        f"Дней Премиума: <b>{days}</b>\n"
+        f"Максимум использований: <b>{max_uses}</b>",
+        reply_markup=promo_menu_kb()
+    )
+
+@router.message(F.text == "📋 Список промокодов")
+async def admin_promo_list(message: Message):
+    if not is_admin(message.from_user.id): return
+    rows = db_query("SELECT code, days, max_uses, uses_count FROM promocodes ORDER BY created_at DESC LIMIT 20", fetch=True)
+    if not rows:
+        await message.answer("Промокодов пока нет.", reply_markup=promo_menu_kb())
+        return
+
+    text = "🎟 <b>Последние 20 промокодов:</b>\n\n"
+    for code, days, max_uses, uses_count in rows:
+        status = "✅" if uses_count < max_uses else "❌"
+        text += f"{status} <code>{code}</code> | {days} дн. | {uses_count}/{max_uses}\n"
+
+    await message.answer(text, reply_markup=promo_menu_kb())
+
+@router.message(PromoFSM.waiting_code, F.text == "⬅️ Отмена")
+async def admin_promo_cancel_code(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
+
+# ---------- ВЫДАЧА/СНЯТИЕ ПРЕМИУМА (АДМИН) ----------
+@router.message(F.text == "🎁 Выдать премиум")
+async def admin_grant_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.set_state(AdminPremiumFSM.waiting_user_id); await state.update_data(action="grant")
+    await message.answer("🎁 <b>Выдача Премиума</b>\n\nВведи <b>user_id</b> пользователя (число).", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_prem_cancel")]]))
+
+@router.message(F.text == "🚫 Снять премиум")
+async def admin_revoke_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.set_state(AdminPremiumFSM.waiting_user_id); await state.update_data(action="revoke")
+    await message.answer("🚫 <b>Снятие Премиума</b>\n\nВведи <b>user_id</b>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_prem_cancel")]]))
+
+@router.message(AdminPremiumFSM.waiting_user_id)
+async def admin_uid_router(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    data = await state.get_data(); action = data.get("action", "grant")
+    raw = (message.text or "").strip()
+    if raw.lower() in ("отмена", "cancel", "/cancel"):
+        await state.clear(); await message.answer("❌ Отменено.", reply_markup=admin_menu_kb()); return
+    if not is_ascii_digits(raw): await message.answer("⚠️ Нужно целое число — user_id."); return
+    target = int(raw)
+    if action == "revoke":
+        await state.clear()
+        if revoke_premium(target):
+            await message.answer(f"🚫 Премиум снят с <code>{target}</code>.", reply_markup=admin_menu_kb())
+            try: await message.bot.send_message(target, "ℹ️ Твой Премиум был отключён администратором.")
+            except Exception: pass
+        else: await message.answer("❌ Юзер не найден.", reply_markup=admin_menu_kb())
+        return
+    row = db_query("SELECT first_name, username FROM users WHERE user_id = ?", (target,), fetchone=True)
+    if not row: await message.answer("❌ Пользователь с таким ID не найден в базе."); return
+    await state.update_data(target_id=target); await state.set_state(AdminPremiumFSM.waiting_days)
+    fname, uname = row
+    await message.answer(f"👤 Найден: <b>{html.escape(fname or '—')}</b> (@{uname or '—'}, <code>{target}</code>)\n\nНа сколько <b>дней</b> выдать премиум? (например, 30)\nЕсли уже есть премиум — дни добавятся сверху.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_prem_cancel")]]))
+
+@router.message(AdminPremiumFSM.waiting_days)
+async def admin_grant_days(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    raw = (message.text or "").strip()
+    if raw.lower() in ("отмена", "cancel", "/cancel"):
+        await state.clear(); await message.answer("❌ Отменено.", reply_markup=admin_menu_kb()); return
+    if not is_ascii_digits(raw): await message.answer("⚠️ Введи число дней от 1 до 3650."); return
+    days = int(raw)
+    if days <= 0 or days > 3650: await message.answer("⚠️ Введи число дней от 1 до 3650."); return
+    data = await state.get_data(); target = data.get("target_id"); await state.clear()
+    if not target: await message.answer("❌ Ошибка: пользователь не выбран.", reply_markup=admin_menu_kb()); return
+    ok = grant_premium_by_id(target, days)
+    if ok:
+        await message.answer(f"✅ Премиум выдан пользователю <code>{target}</code> на <b>{days} дн.</b>", reply_markup=admin_menu_kb())
+        try: await message.bot.send_message(target, f"🎉 <b>Тебе активирован Премиум на {days} дней!</b>\n\nСпасибо, что с нами 💎")
+        except Exception: pass
+    else: await message.answer("❌ Не удалось — юзер не найден.", reply_markup=admin_menu_kb())
+
+@router.callback_query(F.data == "admin_prem_cancel")
+async def admin_prem_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try: await cb.message.edit_text("❌ Отменено.")
+    except Exception: pass
+    await cb.answer()
+
+# ---------- РАССЫЛКА ----------
+@router.message(F.text == "📢 Рассылка")
+async def admin_broadcast_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.set_state(AdminBroadcastFSM.waiting_message)
+    await message.answer("📢 <b>Режим рассылки</b>\n\nОтправь мне сообщение (текст и/или фото), которое нужно разослать.\nПеред отправкой покажу предпросмотр.\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
+
+@router.message(AdminBroadcastFSM.waiting_message)
+async def admin_broadcast_preview(message: Message, state: FSMContext, bot: Bot):
+    if not is_admin(message.from_user.id): return
+    if message.text == "⬅️ Отмена" or (message.text and message.text.lower() in ("отмена", "cancel", "/cancel")):
+        await state.clear(); await message.answer("❌ Рассылка отменена.", reply_markup=admin_menu_kb()); return
+    photo_id = message.photo[-1].file_id if message.photo else None
+    text = message.text if message.text else message.caption
+    if not photo_id and not text: await message.answer("⚠️ Сообщение пустое. Отправь текст или фото."); return
+    await state.update_data(photo_id=photo_id, text=text); await state.set_state(AdminBroadcastFSM.waiting_confirm)
+    total = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
+    eta_sec = total * 0.05; eta_str = f"{int(eta_sec // 60)} мин {int(eta_sec % 60)} сек"
+    await message.answer(f"👁 <b>Предпросмотр</b>\n\nПолучателей: <b>{total}</b>\nОриентировочное время: <b>{eta_str}</b>\n\nОтправляем?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Отправить", callback_data="bc_send")], [InlineKeyboardButton(text="❌ Отмена", callback_data="bc_cancel")]]))
+    try:
+        if photo_id: await bot.send_photo(chat_id=message.chat.id, photo=photo_id, caption=text, parse_mode=ParseMode.HTML)
+        else: await bot.send_message(chat_id=message.chat.id, text=text, parse_mode=ParseMode.HTML)
+    except Exception as e: await message.answer(f"⚠️ Не удалось показать предпросмотр: {e}")
+
+@router.callback_query(F.data == "bc_cancel")
+async def admin_broadcast_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try: await cb.message.edit_text("❌ Рассылка отменена.")
+    except Exception: pass
+    await cb.answer()
+
+@router.callback_query(F.data == "bc_send")
+async def admin_broadcast_send(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not is_admin(cb.from_user.id): await cb.answer("Нет доступа", show_alert=True); return
+    data = await state.get_data(); photo_id = data.get("photo_id"); text = data.get("text"); await state.clear()
+    if not photo_id and not text: await cb.answer("Пустое сообщение", show_alert=True); return
+    users = db_query("SELECT user_id FROM users", fetch=True); total = len(users)
+    try: await cb.message.edit_text(f"⏳ Рассылка для {total} пользователей...")
+    except Exception: pass
+    await cb.answer()
+    sent, blocked = 0, 0
+    for (uid,) in users:
+        try:
+            if photo_id: await bot.send_photo(chat_id=uid, photo=photo_id, caption=text, parse_mode=ParseMode.HTML)
+            else: await bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
+            sent += 1
+        except TelegramBadRequest as e:
+            if "blocked" in str(e).lower() or "chat not found" in str(e).lower(): db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+            blocked += 1
+        except Exception: blocked += 1
+        await asyncio.sleep(0.05)
+    try: await cb.message.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent}\n🚫 Заблокировали/Ошибка: {blocked}")
+    except Exception: await bot.send_message(cb.from_user.id, f"✅ Рассылка: {sent} отправлено, {blocked} ошибок.", reply_markup=admin_menu_kb())
+    await bot.send_message(cb.from_user.id, "Готово.", reply_markup=admin_menu_kb())
+
+# ---------- ЗАПУСК ----------
+async def main():
+    db_init()
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    dp.errors.register(errors_handler)
+
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(fetch_steam_deals, "interval", hours=12, max_instances=1)
+    scheduler.add_job(send_daily_deal, "cron", hour=12, minute=0, args=[bot], max_instances=1)
+    scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
+    scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
+    scheduler.add_job(notify_wishlist_matches, "interval", minutes=30, args=[bot], max_instances=1)
+    scheduler.start()
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Бот запущен (Премиум: 7д/30д/6мес/год, оплата в Telegram Stars, реф +3 дня)!")
+    try: await dp.start_polling(bot)
+    finally:
+        scheduler.shutdown(wait=False)
+        if _db_conn: _db_conn.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
