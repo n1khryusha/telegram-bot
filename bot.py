@@ -314,7 +314,7 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         logger.warning(f"[PHOTO] {e}")
         return False
 
-# ---------- ПАРСЕР STEAM ----------
+# ---------- ПАРСЕР STEAM (УМНЫЙ) ----------
 async def _steam_get_details(session, app_id):
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=ru&l=russian"
     result = {"image": "", "description": "", "price_overview": None}
@@ -331,8 +331,7 @@ async def _steam_get_details(session, app_id):
     return result
 
 def _format_price(price_overview) -> tuple[str, str, str]:
-    if not price_overview:
-        return "", "", ""
+    if not price_overview: return "", "", ""
     currency = price_overview.get("currency", "")
     final = price_overview.get("final", 0) / 100
     initial = price_overview.get("initial", 0) / 100
@@ -350,7 +349,6 @@ def _format_price(price_overview) -> tuple[str, str, str]:
         final_str = f"{final:.2f} {currency}"
         original_str = f"{initial:.2f} {currency}" if discount else ""
         discount_str = f"-{discount}%" if discount else ""
-        
     return final_str, original_str, discount_str
 
 async def fetch_steam_deals():
@@ -364,38 +362,50 @@ async def fetch_steam_deals():
     except Exception as e:
         logger.warning(f"[PARSER] {e}")
         return
+    
     added = 0
     async with aiohttp.ClientSession() as session:
         for item in data.get("specials", {}).get("items", []):
             title, app_id = item.get("name"), item.get("id")
             if not title or not app_id: continue
-            final_price_rub = item.get("final_price", 0) / 100
-            discount_percent = item.get("discount_percent", 0)
-            original_price_rub = item.get("original_price", 0) / 100
-            if final_price_rub <= 0 or discount_percent == 0: continue
-            if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
+            
+            # ВАЖНО: Проверяем актуальную цену через appdetails, чтобы не брать старые скидки
             det = await _steam_get_details(session, app_id)
+            if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
+                continue # Если скидки нет - пропускаем
+            
+            if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
+            
             shop_url = f"https://store.steampowered.com/app/{app_id}/"
             f_str, o_str, d_str = _format_price(det["price_overview"])
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
+            
             db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
             added += 1
             await asyncio.sleep(0.2)
+
         for section_key in ("top_sellers", "new_releases"):
             for item in data.get(section_key, {}).get("items", []):
                 title, app_id = item.get("name"), item.get("id")
                 if not title or not app_id: continue
-                if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
+                
                 det = await _steam_get_details(session, app_id)
+                # Проверяем, что есть скидка
+                if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
+                    continue
+                
+                if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
+                
                 shop_url = f"https://store.steampowered.com/app/{app_id}/"
                 f_str, o_str, d_str = _format_price(det["price_overview"])
                 price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
+                
                 db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
                 added += 1
                 await asyncio.sleep(0.2)
-    logger.info(f"[PARSER] Добавлено новых игр: {added}")
+    logger.info(f"[PARSER] Добавлено новых игр со скидками: {added}")
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
@@ -685,7 +695,7 @@ async def user_promo_start(message: Message, state: FSMContext):
         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
     )
 
-# Обработчик для кнопки "Отмена" (и текста "отмена")
+# Обработчик для кнопки "Отмена"
 @router.message(UserPromoFSM.waiting_code, F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
 async def user_promo_cancel(message: Message, state: FSMContext):
     await state.clear()
@@ -1330,7 +1340,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (с исправлением кнопки отмены)!")
+    logger.info("Бот запущен (умный парсер скидок)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
@@ -1338,5 +1348,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
-
