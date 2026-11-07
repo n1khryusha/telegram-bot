@@ -24,6 +24,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton,
     InputMediaPhoto, BufferedInputFile,
+    LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -50,6 +51,10 @@ CONTACT_EMAIL = "nikhrushawork@gmail.com"
 
 # --- ДОНАТ (DA LINK) ---
 DONATE_URL = "https://dalink.to/beaconkeys"
+
+# --- ЦЕНЫ В ЗВЕЗДАХ ---
+STARS_7_DAYS = 50  # 50 звезд за 7 дней
+STARS_30_DAYS = 150 # 150 звезд за 30 дней
 # ===================================
 
 if not BOT_TOKEN:
@@ -167,6 +172,15 @@ def db_init():
         user_id INTEGER,
         used_at TEXT DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(code, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        payment_id TEXT UNIQUE,
+        user_id INTEGER,
+        amount INTEGER,
+        days INTEGER,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_products_discount ON products(discount);
     CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until);
@@ -369,10 +383,9 @@ async def fetch_steam_deals():
             title, app_id = item.get("name"), item.get("id")
             if not title or not app_id: continue
             
-            # ВАЖНО: Проверяем актуальную цену через appdetails, чтобы не брать старые скидки
             det = await _steam_get_details(session, app_id)
             if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
-                continue # Если скидки нет - пропускаем
+                continue
             
             if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
             
@@ -391,7 +404,6 @@ async def fetch_steam_deals():
                 if not title or not app_id: continue
                 
                 det = await _steam_get_details(session, app_id)
-                # Проверяем, что есть скидка
                 if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
                     continue
                 
@@ -626,7 +638,7 @@ async def profile_menu(message: Message):
     
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ---------- ПРЕМИУМ ----------
+# ---------- ПРЕМИУМ (С ОПЛАТОЙ ЗВЕЗДАМИ) ----------
 async def premium_menu(message: Message, user_id: int | None = None):
     uid = user_id if user_id is not None else message.from_user.id
     is_prem = check_premium(uid)
@@ -655,7 +667,8 @@ async def premium_menu(message: Message, user_id: int | None = None):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref_link")],
+        [InlineKeyboardButton(text=f"🔥 7 дней — {STARS_7_DAYS} ⭐", callback_data="buy_premium_7")],
+        [InlineKeyboardButton(text=f"👑 30 дней — {STARS_30_DAYS} ⭐", callback_data="buy_premium_30")],
     ])
     
     await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
@@ -668,6 +681,58 @@ async def premium_menu_msg(message: Message):
 async def premium_show(cb: CallbackQuery):
     await cb.answer()
     if cb.message: await premium_menu(cb.message, user_id=cb.from_user.id)
+
+# ---------- ОПЛАТА ЗВЕЗДАМИ (TELEGRAM STARS) ----------
+@router.callback_query(F.data.startswith("buy_premium_"))
+async def buy_premium_stars(cb: CallbackQuery):
+    days = 7 if cb.data == "buy_premium_7" else 30
+    price = STARS_7_DAYS if days == 7 else STARS_30_DAYS
+    
+    # Формируем счет
+    prices = [LabeledPrice(label=f"Премиум на {days} дней", amount=price)]
+    
+    try:
+        await cb.bot.send_invoice(
+            chat_id=cb.from_user.id,
+            title=f"Премиум-доступ на {days} дней",
+            description=f"Активация Премиум-доступа в боте BeaconKeys на {days} дней.",
+            payload=f"premium_{days}",
+            provider_token="",  # Для Stars provider_token пустой!
+            currency="XTR",     # XTR - это код валюты Telegram Stars
+            prices=prices,
+            start_parameter="premium",
+        )
+        await cb.answer("Счет выставлен в чате!")
+    except Exception as e:
+        logger.error(f"Ошибка создания счета: {e}")
+        await cb.answer("❌ Ошибка создания счета. Попробуйте позже.", show_alert=True)
+
+# ---------- ПРОВЕРКА ПЕРЕД ОПЛАТОЙ ----------
+@router.pre_checkout_query()
+async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
+    # Подтверждаем готовность принять платеж
+    await pre_checkout_q.answer(ok=True)
+
+# ---------- УСПЕШНАЯ ОПЛАТА ----------
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message):
+    payment_info: SuccessfulPayment = message.successful_payment
+    payload = payment_info.invoice_payload  # Например, "premium_7"
+    
+    try:
+        days = int(payload.split("_")[1])
+    except (IndexError, ValueError):
+        days = 7 # По умолчанию
+
+    add_premium_days(message.from_user.id, days)
+    
+    await message.answer(
+        f"✅ <b>Оплата прошла успешно!</b>\n\n"
+        f"Вам начислено <b>+{days} дней Премиума</b>! 👑\n\n"
+        f"Спасибо за поддержку! 🙏",
+        reply_markup=main_menu_kb()
+    )
+    logger.info(f"[STARS] Пользователь {message.from_user.id} оплатил Премиум на {days} дней. Сумма: {payment_info.total_amount} XTR")
 
 # ---------- ССЫЛКА НА ДРУГА ----------
 @router.callback_query(F.data == "show_ref_link")
@@ -696,7 +761,6 @@ async def user_promo_start(message: Message, state: FSMContext):
         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
     )
 
-# Обработчик для кнопки "Отмена"
 @router.message(UserPromoFSM.waiting_code, F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
 async def user_promo_cancel(message: Message, state: FSMContext):
     await state.clear()
@@ -706,7 +770,6 @@ async def user_promo_cancel(message: Message, state: FSMContext):
 async def user_promo_check(message: Message, state: FSMContext):
     code = (message.text or "").strip().upper()
     
-    # На всякий случай проверяем еще раз
     if code in ("ОТМЕНА", "CANCEL", "/CANCEL"):
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
@@ -1347,7 +1410,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (умный парсер скидок)!")
+    logger.info("Бот запущен (с оплатой в Telegram Stars)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
