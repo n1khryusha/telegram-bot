@@ -484,10 +484,11 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
 def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔄 Спарсить скидки"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="🔄 Спарсить скидки"), KeyboardButton(text="🗑 Очистить базу")],
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Рефералы")],
             [KeyboardButton(text="🎁 Выдать премиум"), KeyboardButton(text="🚫 Снять премиум")],
-            [KeyboardButton(text="🎟 Промокоды"), KeyboardButton(text="👥 Рефералы")],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="⬅️ В меню")],
+            [KeyboardButton(text="🎟 Промокоды"), KeyboardButton(text="📢 Рассылка")],
+            [KeyboardButton(text="⬅️ В меню")],
         ],
         resize_keyboard=True,
     )
@@ -1034,6 +1035,12 @@ async def admin_cmd(message: Message):
 async def to_main(message: Message, state: FSMContext):
     await state.clear(); await message.answer("Главное меню:", reply_markup=main_menu_kb())
 
+@router.message(F.text == "🗑 Очистить базу")
+async def clear_db(message: Message):
+    if not is_admin(message.from_user.id): return
+    db_query("DELETE FROM products")
+    await message.answer("✅ База игр очищена. Теперь нажми «🔄 Спарсить скидки», чтобы загрузить только реальные скидки.", reply_markup=admin_menu_kb())
+
 @router.message(F.text == "🔄 Спарсить скидки")
 async def manual_parse(message: Message):
     if not is_admin(message.from_user.id): return
@@ -1348,5 +1355,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
