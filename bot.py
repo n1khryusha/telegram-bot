@@ -53,8 +53,8 @@ CONTACT_EMAIL = "nikhrushawork@gmail.com"
 DONATE_URL = "https://dalink.to/beaconkeys"
 
 # --- ЦЕНЫ В ЗВЕЗДАХ ---
-STARS_7_DAYS = 50  # 50 звезд за 7 дней
-STARS_30_DAYS = 150 # 150 звезд за 30 дней
+STARS_7_DAYS = 150  # 50 звезд за 7 дней
+STARS_30_DAYS = 350 # 150 звезд за 30 дней
 # ===================================
 
 if not BOT_TOKEN:
