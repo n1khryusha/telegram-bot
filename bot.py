@@ -36,7 +36,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 LOG_PATH = os.getenv("LOG_PATH", "/data/bot.log")
-REVIEW_CHAT_ID = int(os.getenv("REVIEW_CHAT_ID", "5512037261")) # ID чата для отзывов
+# ID чата для отзывов
+REVIEW_CHAT_ID = int(os.getenv("REVIEW_CHAT_ID", "-1004296458172"))
 
 # --- PLATI.MARKET ---
 PLATI_AGENT_ID = os.getenv("PLATI_AGENT_ID", "1480092")
@@ -147,6 +148,7 @@ def db_init():
         premium_until TEXT,
         last_roulette TEXT,
         last_random_again TEXT,
+        last_review_date TEXT,
         referred_by INTEGER,
         ref_bonus_claimed INTEGER DEFAULT 0
     );
@@ -211,6 +213,8 @@ def db_init():
         cur.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
     if "ref_bonus_claimed" not in cols:
         cur.execute("ALTER TABLE users ADD COLUMN ref_bonus_claimed INTEGER DEFAULT 0")
+    if "last_review_date" not in cols:
+        cur.execute("ALTER TABLE users ADD COLUMN last_review_date TEXT")
 
     cur.execute("PRAGMA table_info(products)")
     cols = {row[1] for row in cur.fetchall()}
@@ -520,10 +524,13 @@ async def notify_premium_super_deals(bot: Bot):
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра")],
-            [KeyboardButton(text="💳 Пополнить Steam"), KeyboardButton(text="📱 Мобильные игры")],
-            [KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="⭐ Оставить отзыв")],
+            # Ряд 1
+            [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра"), KeyboardButton(text="💳 Пополнить Steam")],
+            # Ряд 2
+            [KeyboardButton(text="📱 Мобильные игры"), KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
+            # Ряд 3
+            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="⭐ Оставить отзыв"), KeyboardButton(text="📢 Реклама")],
+            # Ряд 4
             [KeyboardButton(text="❤️ Поддержать"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
@@ -737,6 +744,23 @@ async def profile_back(cb: CallbackQuery):
 # ---------- ОТЗЫВЫ ----------
 @router.message(F.text == "⭐ Оставить отзыв")
 async def review_start(message: Message):
+    uid = message.from_user.id
+    
+    res = db_query("SELECT last_review_date FROM users WHERE user_id = ?", (uid,), fetchone=True)
+    if res and res[0]:
+        last_date = parse_dt(res[0])
+        if last_date:
+            time_passed = utcnow() - last_date
+            if time_passed < timedelta(days=7):
+                days_left = 7 - time_passed.days
+                hours_left = (timedelta(days=7) - time_passed).seconds // 3600
+                await message.answer(
+                    f"⏳ <b>Вы уже оставляли отзыв недавно!</b>\n\n"
+                    f"Следующий отзыв можно оставить через <b>{days_left} дн. {hours_left} ч.</b>\n\n"
+                    f"<i>Мы ограничили частоту отзывов, чтобы они оставались честными и не спамили.</i>"
+                )
+                return
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="1 ⭐", callback_data="rate_1"),
          InlineKeyboardButton(text="2 ⭐", callback_data="rate_2"),
@@ -793,7 +817,8 @@ async def review_text(message: Message, state: FSMContext, bot: Bot):
     rating = data.get("rating", 5)
     await state.clear()
 
-    # Формируем отзыв
+    db_query("UPDATE users SET last_review_date = ? WHERE user_id = ?", (utcnow_iso(), message.from_user.id))
+
     user_info = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
     review_msg = (
         f"📩 <b>Новый отзыв о боте!</b>\n\n"
@@ -802,18 +827,19 @@ async def review_text(message: Message, state: FSMContext, bot: Bot):
         f"💬 <b>Комментарий:</b>\n{html.escape(text)}"
     )
 
-    # Отправляем в чат
     try:
         await bot.send_message(chat_id=REVIEW_CHAT_ID, text=review_msg, parse_mode=ParseMode.HTML)
         await message.answer(
             "✅ <b>Спасибо за отзыв!</b>\n\n"
-            "Ваше мнение очень важно для нас, мы обязательно его учтем.",
+            "Ваше мнение очень важно для нас, мы обязательно его учтем.\n"
+            "<i>Следующий отзыв можно будет оставить через 7 дней.</i>",
             reply_markup=main_menu_kb()
         )
     except Exception as e:
         logger.error(f"Ошибка отправки отзыва: {e}")
         await message.answer(
-            "✅ Спасибо! Ваш отзыв сохранен, но произошла ошибка при отправке администратору.",
+            "✅ Спасибо! Ваш отзыв сохранен, но произошла ошибка при отправке администратору.\n"
+            f"(Техническая причина: {type(e).__name__})",
             reply_markup=main_menu_kb()
         )
 
@@ -1287,6 +1313,18 @@ async def mobile_help(cb: CallbackQuery):
     await cb.answer()
     await cb.message.answer("❓ <b>Как пополнить мобильную игру</b>\n\n1️⃣ Нажми «Пополнить мобильные игры»\n2️⃣ Выбери свою игру из списка\n3️⃣ Введи <b>игровой ID</b> (не логин/пароль!)\n4️⃣ Выбери номинал (например, 60 гемов, 100 UC)\n5️⃣ Оплати картой\n\n⚠️ <b>Важно:</b> вводи только игровой ID!\n\n" f"Если что-то пошло не так — пиши {PLATI_SUPPORT}")
 
+# ---------- РЕКЛАМА ----------
+@router.message(F.text == "📢 Реклама")
+async def ads_info(message: Message):
+    await message.answer(
+        "📢 <b>Реклама в нашем боте</b>\n\n"
+        "Покупая рекламу, вы получаете <b>рассылку вашего рекламного поста всем пользователям нашего бота</b>.\n\n"
+        "🎯 Мы отправим ваше сообщение (текст + фото/видео) каждому пользователю бота.\n"
+        "📊 Вы получите охват всей нашей аудитории.\n\n"
+        f"Для заказа и уточнения цены пиши: 👉 <b>{CONTACT_TG}</b>",
+        reply_markup=main_menu_kb(),
+    )
+
 # ---------- ДОНАТ (ПОДДЕРЖАТЬ) ----------
 @router.message(F.text == "❤️ Поддержать")
 async def donate_info(message: Message):
@@ -1635,7 +1673,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Жанры, Избранное, Отзывы, любые скидки)!")
+    logger.info("Бот запущен (Жанры, Избранное, Отзывы, Меню в 3 столбца)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
