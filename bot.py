@@ -77,6 +77,11 @@ router = Router()
 PAGE_LIMIT = 50
 FAVORITES_LIMIT_FREE = 3
 FAVORITES_LIMIT_PREMIUM = 20
+GENRES_LIMIT_FREE = 3
+GENRES_LIMIT_PREMIUM = 10
+
+# Список доступных жанров (для кнопок)
+AVAILABLE_GENRES = ["Action", "Adventure", "RPG", "Strategy", "Simulation", "Indie", "Massively Multiplayer", "Casual", "Racing", "Sports"]
 
 # ---------- КЭШ КАРТИНОК ----------
 IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
@@ -123,6 +128,7 @@ def db_init():
         image TEXT,
         description TEXT,
         price_usd TEXT,
+        genres TEXT,
         clicks INTEGER DEFAULT 0,
         tg_file_id TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -137,6 +143,11 @@ def db_init():
         last_random_again TEXT,
         referred_by INTEGER,
         ref_bonus_claimed INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS user_genres (
+        user_id INTEGER,
+        genre TEXT,
+        UNIQUE(user_id, genre)
     );
     CREATE TABLE IF NOT EXISTS notified_deals (
         product_id INTEGER PRIMARY KEY,
@@ -199,6 +210,8 @@ def db_init():
     cols = {row[1] for row in cur.fetchall()}
     if "tg_file_id" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN tg_file_id TEXT")
+    if "genres" not in cols:
+        cur.execute("ALTER TABLE products ADD COLUMN genres TEXT")
     _db_conn.commit()
 
 def db_query(sql, params=(), fetch=False, fetchone=False):
@@ -283,6 +296,25 @@ def revoke_premium(user_id: int) -> bool:
     db_query("UPDATE users SET premium_until = NULL WHERE user_id = ?", (user_id,))
     return True
 
+# ---------- ЖАНРЫ ----------
+def get_user_genres(user_id: int) -> list:
+    rows = db_query("SELECT genre FROM user_genres WHERE user_id = ?", (user_id,), fetch=True)
+    return [row[0] for row in rows]
+
+def toggle_user_genre(user_id: int, genre: str) -> str:
+    """Возвращает 'added', 'removed' или 'limit'."""
+    current = get_user_genres(user_id)
+    limit = GENRES_LIMIT_PREMIUM if check_premium(user_id) else GENRES_LIMIT_FREE
+    
+    if genre in current:
+        db_query("DELETE FROM user_genres WHERE user_id = ? AND genre = ?", (user_id, genre))
+        return "removed"
+    else:
+        if len(current) >= limit:
+            return "limit"
+        db_query("INSERT OR IGNORE INTO user_genres (user_id, genre) VALUES (?, ?)", (user_id, genre))
+        return "added"
+
 # ---------- СКАЧИВАНИЕ КАРТИНОК ----------
 async def download_image(url: str) -> bytes | None:
     global _image_cache_size
@@ -330,10 +362,10 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         logger.warning(f"[PHOTO] {e}")
         return False
 
-# ---------- ПАРСЕР STEAM (ФИЛЬТР DLC, ЛЮБЫЕ СКИДКИ) ----------
+# ---------- ПАРСЕР STEAM (С ЖАНРАМИ) ----------
 async def _steam_get_details(session, app_id):
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=ru&l=russian"
-    result = {"image": "", "description": "", "price_overview": None, "type": "game", "genres": []}
+    result = {"image": "", "description": "", "price_overview": None, "type": "game", "genres": ""}
     try:
         async with session.get(details_url, timeout=8) as resp:
             if resp.status == 200:
@@ -343,7 +375,11 @@ async def _steam_get_details(session, app_id):
                     result["image"] = game_data.get("header_image", "")
                     result["description"] = game_data.get("short_description", "")
                     result["price_overview"] = game_data.get("price_overview")
-                    result["type"] = game_data.get("type", "game") # game, dlc, music, software
+                    result["type"] = game_data.get("type", "game")
+                    # Собираем жанры через запятую
+                    genres = game_data.get("genres", [])
+                    if genres:
+                        result["genres"] = ",".join([g["description"] for g in genres])
     except Exception: pass
     return result
 
@@ -396,17 +432,12 @@ async def fetch_steam_deals():
             det = await _steam_get_details(session, app_id)
             
             # --- ФИЛЬТРАЦИЯ ---
-            # 1. Только игры (исключаем DLC, музыку, софт)
             if det["type"] != "game":
                 continue
-                
-            # 2. Жесткий фильтр по названию и описанию (отсекаем саундтреки и DLC, которые Steam иногда маскирует под игры)
             if re.search(r'(soundtrack|ost|artbook|art book|dlc|expansion|season pass)', title, re.IGNORECASE):
                 continue
             if "additional content for" in det["description"].lower():
                 continue
-                
-            # 3. Проверяем, есть ли вообще скидка
             if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
                 continue
 
@@ -416,12 +447,12 @@ async def fetch_steam_deals():
             f_str, o_str, d_str = _format_price(det["price_overview"])
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
 
-            db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
+            db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd, genres) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd, det["genres"]))
             added += 1
             await asyncio.sleep(0.2)
 
-    logger.info(f"[PARSER] Добавлено новых игр со скидками (без DLC/OST): {added}")
+    logger.info(f"[PARSER] Добавлено новых игр со скидками: {added}")
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
@@ -453,7 +484,6 @@ async def send_daily_deal(bot: Bot):
 
 # ---------- УВЕДОМЛЕНИЯ ИЗБРАННОГО ----------
 async def notify_favorites_matches(bot: Bot):
-    # Уведомляем, если игра из Избранного попала в скидки
     rows = db_query("SELECT f.user_id, p.id, p.title, p.price, p.discount, p.url, p.image, p.description FROM favorites f JOIN products p ON p.id = f.product_id JOIN users u ON u.user_id = f.user_id WHERE u.premium_until > ? AND p.discount IS NOT NULL AND p.discount != '' AND NOT EXISTS (SELECT 1 FROM notified_favorites nf WHERE nf.user_id = f.user_id AND nf.product_id = p.id) LIMIT 50", (utcnow_iso(),), fetch=True)
     if not rows: return
     for uid, pid, title, price, discount, url, image, desc in rows:
@@ -604,6 +634,10 @@ async def profile_menu(message: Message):
     until = get_premium_until(uid)
     joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
     f_count, f_limit = favorites_count(uid), favorites_limit(uid)
+    
+    genres = get_user_genres(uid)
+    g_limit = GENRES_LIMIT_PREMIUM if is_prem else GENRES_LIMIT_FREE
+    g_text = ", ".join(genres) if genres else "не выбраны"
 
     refs = db_query(
         "SELECT username, first_name FROM users WHERE referred_by = ? ORDER BY joined_at DESC LIMIT 20",
@@ -620,6 +654,7 @@ async def profile_menu(message: Message):
     else:
         text += "💎 Статус: <b>Обычный</b>\n"
     text += f"\n⭐ <b>Избранное:</b> {f_count} / {f_limit} игр\n"
+    text += f"🎮 <b>Твои жанры:</b> {g_text} ({len(genres)}/{g_limit})\n"
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
 
     if refs:
@@ -633,10 +668,66 @@ async def profile_menu(message: Message):
     buttons = [
         [InlineKeyboardButton(text="🎁 Пригласить друга (+3 дня)", callback_data="show_ref_link")],
         [InlineKeyboardButton(text="⭐ Мое Избранное", callback_data="fav_show")],
+        [InlineKeyboardButton(text="🎮 Выбрать жанры для рулетки", callback_data="genres_show")],
         [InlineKeyboardButton(text="❤️ Поддержать проект", url=DONATE_URL)],
     ]
     
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+# ---------- ВЫБОР ЖАНРОВ ----------
+@router.callback_query(F.data == "genres_show")
+async def genres_show(cb: CallbackQuery):
+    uid = cb.from_user.id
+    is_prem = check_premium(uid)
+    limit = GENRES_LIMIT_PREMIUM if is_prem else GENRES_LIMIT_FREE
+    current = get_user_genres(uid)
+    
+    text = (
+        f"🎮 <b>Настройка жанров для рулетки</b>\n\n"
+        f"Выбери до <b>{limit}</b> жанров. Когда ты нажмешь «🎲 Случайная игра», "
+        f"бот будет искать игры только среди них.\n\n"
+        f"<i>Нажми на жанр, чтобы добавить или убрать его.</i>\n\n"
+        f"Выбрано: <b>{len(current)} / {limit}</b>"
+    )
+    
+    # Создаем кнопки с галочками
+    buttons = []
+    row = []
+    for genre in AVAILABLE_GENRES:
+        check = "✅ " if genre in current else ""
+        row.append(InlineKeyboardButton(text=f"{check}{genre}", callback_data=f"genre_toggle_{genre}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+        
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад в профиль", callback_data="profile_back")])
+    
+    try:
+        await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except TelegramBadRequest:
+        pass # Если сообщение не изменилось
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("genre_toggle_"))
+async def genre_toggle(cb: CallbackQuery):
+    uid = cb.from_user.id
+    genre = cb.data.split("_", 2)[2]
+    res = toggle_user_genre(uid, genre)
+    
+    if res == "limit":
+        limit = GENRES_LIMIT_PREMIUM if check_premium(uid) else GENRES_LIMIT_FREE
+        await cb.answer(f"❌ Лимит жанров: {limit}.\nУбери один из выбранных или купи Премиум (до 10).", show_alert=True)
+        return
+    
+    await genres_show(cb)
+
+@router.callback_query(F.data == "profile_back")
+async def profile_back(cb: CallbackQuery):
+    await cb.answer()
+    # Эмулируем нажатие кнопки "Профиль"
+    await profile_menu(cb.message)
 
 # ---------- ПРЕМИУМ (С ОПЛАТОЙ ЗВЕЗДАМИ) ----------
 async def premium_menu(message: Message, user_id: int | None = None):
@@ -659,6 +750,8 @@ async def premium_menu(message: Message, user_id: int | None = None):
         "   <i>Рулетка выдает игры с максимальным процентом скидки.</i>\n\n"
         "⭐ <b>Избранное до 20 игр</b>\n"
         "   <i>Добавляй больше игр в список желаемого.</i>\n\n"
+        "🎮 <b>До 10 жанров в рулетке</b>\n"
+        "   <i>Настраивай рулетку под себя.</i>\n\n"
         "🔔 <b>Мгновенные алерты</b>\n"
         "   <i>Персональные уведомления, как только на игру из Избранного появляется скидка или цена падает ниже 80%.</i>\n\n"
         "🎁 <b>Как получить Премиум БЕСПЛАТНО?</b>\n"
@@ -712,8 +805,8 @@ async def buy_premium_stars(cb: CallbackQuery):
             title=f"Премиум-доступ на {days} дней",
             description=f"Активация Премиум-доступа в боте BeaconKeys на {days} дней.",
             payload=f"premium_{days}",
-            provider_token="",   # Для Stars — пустой
-            currency="XTR",      # XTR — код валюты Telegram Stars
+            provider_token="",
+            currency="XTR",
             prices=prices,
             start_parameter="premium",
         )
@@ -731,7 +824,7 @@ async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     payment_info: SuccessfulPayment = message.successful_payment
-    payload = payment_info.invoice_payload  # Например, "premium_7"
+    payload = payment_info.invoice_payload
 
     try:
         days = int(payload.split("_")[1])
@@ -840,7 +933,6 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     global_index = offset + index + 1
     text += f"\n📄 Игра {global_index} из {total}"
     
-    # Проверяем, добавлена ли игра в избранное
     uid = message_or_callback.from_user.id
     is_fav = db_query("SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?", (uid, pid), fetchone=True)
     
@@ -852,7 +944,6 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     if nav_row: buttons.append(nav_row)
     buttons.append([InlineKeyboardButton(text="🛒 Купить в Steam", url=url)])
     
-    # Кнопка Избранного
     if is_fav:
         buttons.append([InlineKeyboardButton(text="✅ В Избранном", callback_data="fav_already")])
     else:
@@ -917,11 +1008,9 @@ async def fav_add(cb: CallbackQuery):
     db_query("INSERT OR IGNORE INTO favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
     await cb.answer("✅ Игра добавлена в Избранное! Теперь ты получишь уведомление, если на нее будет скидка.")
     
-    # Обновляем карточку
     products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE id = ?", (pid,), fetch=True)
     if products:
         total = db_query("SELECT COUNT(*) FROM products WHERE image IS NOT NULL AND image != ''", fetchone=True)[0]
-        # Просто перерисовываем текущую карточку
         await send_product_card(cb, products, 0, 0, total)
 
 @router.callback_query(F.data == "fav_already")
@@ -955,6 +1044,108 @@ async def fav_del(cb: CallbackQuery):
     db_query("DELETE FROM favorites WHERE product_id = ? AND user_id = ?", (pid, cb.from_user.id))
     await cb.answer("Удалено из Избранного")
     await fav_show(cb)
+
+# ---------- СЛУЧАЙНАЯ ИГРА (С УЧЕТОМ ЖАНРОВ) ----------
+@router.message(F.text == "🎲 Случайная игра")
+async def random_game(message: Message):
+    user_id = message.from_user.id
+    is_prem = check_premium(user_id)
+    
+    # Проверка лимита для обычных юзеров
+    if not is_prem:
+        res = db_query("SELECT last_roulette FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+        last = parse_dt(res[0]) if res else None
+        if last and utcnow() - last < timedelta(days=1):
+            time_left = timedelta(days=1) - (utcnow() - last)
+            h, m = time_left.seconds // 3600, (time_left.seconds % 3600) // 60
+            await message.answer(f"⏳ <b>Лимит рулетки!</b>\n\nОбычные пользователи — 1 раз в день.\nСледующая попытка через: <b>{h} ч. {m} мин.</b>\n\n💎 <b>Купи Премиум</b> — крути без ограничений!")
+            return
+
+    # Получаем выбранные жанры
+    user_genres = get_user_genres(user_id)
+    
+    # Формируем SQL-запрос
+    if user_genres:
+        # Ищем игры, в жанрах которых есть хотя бы один из выбранных
+        genre_conditions = " OR ".join(["genres LIKE ?"] * len(user_genres))
+        params = [f"%{g}%" for g in user_genres]
+        
+        if is_prem:
+            query = f"SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE ({genre_conditions}) AND discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 20"
+        else:
+            query = f"SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE ({genre_conditions}) AND image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1"
+        
+        candidates = db_query(query, params, fetch=True)
+        game = random.choice(candidates) if candidates else None
+        
+        if not game:
+            await message.answer(f"😔 В жанрах {', '.join(user_genres)} пока нет игр со скидками.\nПопробуй выбрать другие жанры в профиле или зайди позже.")
+            return
+    else:
+        # Если жанры не выбраны, стандартная логика
+        if is_prem:
+            candidates = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 20", fetch=True)
+            game = random.choice(candidates) if candidates else None
+        else: game = None
+        if not game:
+            game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1", fetchone=True)
+    
+    if not game: await message.answer("В базе пока нет игр."); return
+    
+    db_query("UPDATE users SET last_roulette = ? WHERE user_id = ?", (utcnow_iso(), user_id))
+    pid, title, price, old_price, discount, url, image, description, price_usd = game
+    display_usd = f" (в долларах: {price_usd})" if (price_usd and "руб" not in price_usd.lower() and "₽" not in price_usd) else ""
+    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
+    if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
+    if price: text += f"💵 Цена: <b>{price}</b>{display_usd}\n"
+    if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
+    if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
+    if is_prem: text += "\n👑 <i>Бонус Премиум: максимальная скидка!</i>"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]])
+    ok = await send_game_photo(message.bot, message.chat.id, pid, image, text, kb)
+    if not ok: await message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+@router.callback_query(F.data == "random_again")
+async def random_again(cb: CallbackQuery):
+    uid = cb.from_user.id
+    is_prem = check_premium(uid)
+    if not is_prem:
+        res = db_query("SELECT last_random_again FROM users WHERE user_id = ?", (uid,), fetchone=True)
+        last = parse_dt(res[0]) if res else None
+        if last and utcnow() - last < timedelta(minutes=10):
+            await cb.answer("⏳ Раз в 10 минут. Купи Премиум — без лимита!", show_alert=True)
+            return
+    
+    user_genres = get_user_genres(uid)
+    
+    if user_genres:
+        genre_conditions = " OR ".join(["genres LIKE ?"] * len(user_genres))
+        params = [f"%{g}%" for g in user_genres]
+        
+        if is_prem:
+            query = f"SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE ({genre_conditions}) AND discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 1"
+        else:
+            query = f"SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE ({genre_conditions}) AND image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1"
+        
+        game = db_query(query, params, fetchone=True)
+    else:
+        if is_prem:
+            game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 1", fetchone=True)
+        else:
+            game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1", fetchone=True)
+    
+    await cb.answer()
+    if not game: await cb.answer("В базе пока пусто", show_alert=True); return
+    if not is_prem: db_query("UPDATE users SET last_random_again = ? WHERE user_id = ?", (utcnow_iso(), uid))
+    pid, title, price, old_price, discount, url, image, description, price_usd = game
+    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
+    if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
+    if price: text += f"💵 Цена: <b>{price}</b>\n"
+    if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
+    if description: text += f"\n📝 <i>{safe_html_truncate(description, 150)}...</i>\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]])
+    ok = await send_game_photo(cb.bot, cb.message.chat.id, pid, image, text, kb)
+    if not ok: await cb.message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 # ---------- ПОПОЛНЕНИЕ STEAM ----------
 @router.message(F.text == "💳 Пополнить Steam")
@@ -1373,7 +1564,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Избранное, жесткий фильтр DLC/OST, любые скидки)!")
+    logger.info("Бот запущен (Жанры, Избранное, любые скидки)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
