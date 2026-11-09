@@ -36,6 +36,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 LOG_PATH = os.getenv("LOG_PATH", "/data/bot.log")
+REVIEW_CHAT_ID = int(os.getenv("REVIEW_CHAT_ID", "5512037261")) # ID чата для отзывов
 
 # --- PLATI.MARKET ---
 PLATI_AGENT_ID = os.getenv("PLATI_AGENT_ID", "1480092")
@@ -80,8 +81,13 @@ FAVORITES_LIMIT_PREMIUM = 20
 GENRES_LIMIT_FREE = 3
 GENRES_LIMIT_PREMIUM = 10
 
-# Список доступных жанров (для кнопок)
-AVAILABLE_GENRES = ["Action", "Adventure", "RPG", "Strategy", "Simulation", "Indie", "Massively Multiplayer", "Casual", "Racing", "Sports"]
+# Расширенный список доступных жанров
+AVAILABLE_GENRES = [
+    "Action", "Adventure", "RPG", "Strategy", "Simulation", 
+    "Indie", "Massively Multiplayer", "Casual", "Racing", "Sports",
+    "Horror", "Survival", "Open World", "Puzzle", "Platformer",
+    "Shooter", "Fighting", "Stealth", "Arcade", "Visual Novel"
+]
 
 # ---------- КЭШ КАРТИНОК ----------
 IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
@@ -376,7 +382,6 @@ async def _steam_get_details(session, app_id):
                     result["description"] = game_data.get("short_description", "")
                     result["price_overview"] = game_data.get("price_overview")
                     result["type"] = game_data.get("type", "game")
-                    # Собираем жанры через запятую
                     genres = game_data.get("genres", [])
                     if genres:
                         result["genres"] = ",".join([g["description"] for g in genres])
@@ -431,7 +436,6 @@ async def fetch_steam_deals():
 
             det = await _steam_get_details(session, app_id)
             
-            # --- ФИЛЬТРАЦИЯ ---
             if det["type"] != "game":
                 continue
             if re.search(r'(soundtrack|ost|artbook|art book|dlc|expansion|season pass)', title, re.IGNORECASE):
@@ -519,8 +523,8 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра")],
             [KeyboardButton(text="💳 Пополнить Steam"), KeyboardButton(text="📱 Мобильные игры")],
             [KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="❤️ Поддержать")],
-            [KeyboardButton(text="📢 Реклама"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="⭐ Оставить отзыв")],
+            [KeyboardButton(text="❤️ Поддержать"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
     )
@@ -569,6 +573,9 @@ class PromoFSM(StatesGroup):
 
 class UserPromoFSM(StatesGroup):
     waiting_code = State()
+
+class ReviewFSM(StatesGroup):
+    waiting_text = State()
 
 # ---------- ERROR HANDLER ----------
 async def errors_handler(event, exception: Exception, bot: Bot):
@@ -690,7 +697,6 @@ async def genres_show(cb: CallbackQuery):
         f"Выбрано: <b>{len(current)} / {limit}</b>"
     )
     
-    # Создаем кнопки с галочками
     buttons = []
     row = []
     for genre in AVAILABLE_GENRES:
@@ -707,7 +713,7 @@ async def genres_show(cb: CallbackQuery):
     try:
         await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except TelegramBadRequest:
-        pass # Если сообщение не изменилось
+        pass
     await cb.answer()
 
 @router.callback_query(F.data.startswith("genre_toggle_"))
@@ -726,8 +732,90 @@ async def genre_toggle(cb: CallbackQuery):
 @router.callback_query(F.data == "profile_back")
 async def profile_back(cb: CallbackQuery):
     await cb.answer()
-    # Эмулируем нажатие кнопки "Профиль"
     await profile_menu(cb.message)
+
+# ---------- ОТЗЫВЫ ----------
+@router.message(F.text == "⭐ Оставить отзыв")
+async def review_start(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 ⭐", callback_data="rate_1"),
+         InlineKeyboardButton(text="2 ⭐", callback_data="rate_2"),
+         InlineKeyboardButton(text="3 ⭐", callback_data="rate_3"),
+         InlineKeyboardButton(text="4 ⭐", callback_data="rate_4"),
+         InlineKeyboardButton(text="5 ⭐", callback_data="rate_5")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="review_cancel")]
+    ])
+    await message.answer(
+        "⭐ <b>Оцените нашего бота!</b>\n\n"
+        "Поставьте оценку от 1 до 5 звезд, нажав на кнопку ниже. "
+        "После этого вы сможете написать небольшой комментарий.",
+        reply_markup=kb
+    )
+
+@router.callback_query(F.data.startswith("rate_"))
+async def review_rate(cb: CallbackQuery, state: FSMContext):
+    rating = int(cb.data.split("_")[1])
+    await state.update_data(rating=rating)
+    await state.set_state(ReviewFSM.waiting_text)
+    
+    await cb.message.edit_text(
+        f"Вы поставили оценку: <b>{rating} ⭐</b>\n\n"
+        "Теперь напишите небольшой комментарий о боте (что понравилось, что можно улучшить).\n\n"
+        "<i>Напишите «отмена», чтобы выйти.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="review_cancel")]])
+    )
+    await cb.answer()
+
+@router.callback_query(F.data == "review_cancel")
+async def review_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try: await cb.message.edit_text("❌ Оставление отзыва отменено.")
+    except Exception: pass
+    await cb.answer()
+
+@router.message(ReviewFSM.waiting_text)
+async def review_text(message: Message, state: FSMContext, bot: Bot):
+    text = (message.text or "").strip()
+    if text.lower() in ("отмена", "cancel", "/cancel"):
+        await state.clear()
+        await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
+        return
+    
+    if len(text) < 5:
+        await message.answer("⚠️ Комментарий слишком короткий. Напишите хотя бы пару слов.")
+        return
+        
+    if len(text) > 1000:
+        await message.answer("⚠️ Комментарий слишком длинный (макс. 1000 символов).")
+        return
+
+    data = await state.get_data()
+    rating = data.get("rating", 5)
+    await state.clear()
+
+    # Формируем отзыв
+    user_info = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    review_msg = (
+        f"📩 <b>Новый отзыв о боте!</b>\n\n"
+        f"👤 <b>От:</b> {html.escape(user_info)} (<code>{message.from_user.id}</code>)\n"
+        f"⭐ <b>Оценка:</b> {rating}/5\n"
+        f"💬 <b>Комментарий:</b>\n{html.escape(text)}"
+    )
+
+    # Отправляем в чат
+    try:
+        await bot.send_message(chat_id=REVIEW_CHAT_ID, text=review_msg, parse_mode=ParseMode.HTML)
+        await message.answer(
+            "✅ <b>Спасибо за отзыв!</b>\n\n"
+            "Ваше мнение очень важно для нас, мы обязательно его учтем.",
+            reply_markup=main_menu_kb()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки отзыва: {e}")
+        await message.answer(
+            "✅ Спасибо! Ваш отзыв сохранен, но произошла ошибка при отправке администратору.",
+            reply_markup=main_menu_kb()
+        )
 
 # ---------- ПРЕМИУМ (С ОПЛАТОЙ ЗВЕЗДАМИ) ----------
 async def premium_menu(message: Message, user_id: int | None = None):
@@ -1051,7 +1139,6 @@ async def random_game(message: Message):
     user_id = message.from_user.id
     is_prem = check_premium(user_id)
     
-    # Проверка лимита для обычных юзеров
     if not is_prem:
         res = db_query("SELECT last_roulette FROM users WHERE user_id = ?", (user_id,), fetchone=True)
         last = parse_dt(res[0]) if res else None
@@ -1061,12 +1148,9 @@ async def random_game(message: Message):
             await message.answer(f"⏳ <b>Лимит рулетки!</b>\n\nОбычные пользователи — 1 раз в день.\nСледующая попытка через: <b>{h} ч. {m} мин.</b>\n\n💎 <b>Купи Премиум</b> — крути без ограничений!")
             return
 
-    # Получаем выбранные жанры
     user_genres = get_user_genres(user_id)
     
-    # Формируем SQL-запрос
     if user_genres:
-        # Ищем игры, в жанрах которых есть хотя бы один из выбранных
         genre_conditions = " OR ".join(["genres LIKE ?"] * len(user_genres))
         params = [f"%{g}%" for g in user_genres]
         
@@ -1082,7 +1166,6 @@ async def random_game(message: Message):
             await message.answer(f"😔 В жанрах {', '.join(user_genres)} пока нет игр со скидками.\nПопробуй выбрать другие жанры в профиле или зайди позже.")
             return
     else:
-        # Если жанры не выбраны, стандартная логика
         if is_prem:
             candidates = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 20", fetch=True)
             game = random.choice(candidates) if candidates else None
@@ -1203,18 +1286,6 @@ async def mobile_topup_menu(message: Message):
 async def mobile_help(cb: CallbackQuery):
     await cb.answer()
     await cb.message.answer("❓ <b>Как пополнить мобильную игру</b>\n\n1️⃣ Нажми «Пополнить мобильные игры»\n2️⃣ Выбери свою игру из списка\n3️⃣ Введи <b>игровой ID</b> (не логин/пароль!)\n4️⃣ Выбери номинал (например, 60 гемов, 100 UC)\n5️⃣ Оплати картой\n\n⚠️ <b>Важно:</b> вводи только игровой ID!\n\n" f"Если что-то пошло не так — пиши {PLATI_SUPPORT}")
-
-# ---------- РЕКЛАМА ----------
-@router.message(F.text == "📢 Реклама")
-async def ads_info(message: Message):
-    await message.answer(
-        "📢 <b>Реклама в нашем боте</b>\n\n"
-        "Покупая рекламу, вы получаете <b>рассылку вашего рекламного поста всем пользователям нашего бота</b>.\n\n"
-        "🎯 Мы отправим ваше сообщение (текст + фото/видео) каждому пользователю бота.\n"
-        "📊 Вы получите охват всей нашей аудитории.\n\n"
-        f"Для заказа и уточнения цены пиши: 👉 <b>{CONTACT_TG}</b>",
-        reply_markup=main_menu_kb(),
-    )
 
 # ---------- ДОНАТ (ПОДДЕРЖАТЬ) ----------
 @router.message(F.text == "❤️ Поддержать")
@@ -1564,7 +1635,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Жанры, Избранное, любые скидки)!")
+    logger.info("Бот запущен (Жанры, Избранное, Отзывы, любые скидки)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
