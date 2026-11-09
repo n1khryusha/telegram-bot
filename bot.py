@@ -396,11 +396,17 @@ async def fetch_steam_deals():
             det = await _steam_get_details(session, app_id)
             
             # --- ФИЛЬТРАЦИЯ ---
-            # Только игры (исключаем DLC, музыку, софт)
+            # 1. Только игры (исключаем DLC, музыку, софт)
             if det["type"] != "game":
                 continue
                 
-            # Проверяем, есть ли вообще скидка (убрали жесткий порог 40%)
+            # 2. Жесткий фильтр по названию и описанию (отсекаем саундтреки и DLC, которые Steam иногда маскирует под игры)
+            if re.search(r'(soundtrack|ost|artbook|art book|dlc|expansion|season pass)', title, re.IGNORECASE):
+                continue
+            if "additional content for" in det["description"].lower():
+                continue
+                
+            # 3. Проверяем, есть ли вообще скидка
             if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
                 continue
 
@@ -415,7 +421,7 @@ async def fetch_steam_deals():
             added += 1
             await asyncio.sleep(0.2)
 
-    logger.info(f"[PARSER] Добавлено новых игр со скидками (без DLC): {added}")
+    logger.info(f"[PARSER] Добавлено новых игр со скидками (без DLC/OST): {added}")
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
@@ -850,7 +856,7 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     if is_fav:
         buttons.append([InlineKeyboardButton(text="✅ В Избранном", callback_data="fav_already")])
     else:
-        buttons.append([InlineKeyboardButton(text="🔔 Следить за ценой", callback_data=f"fav_add_{pid}")])
+        buttons.append([InlineKeyboardButton(text="⭐ Добавить в избранное", callback_data=f"fav_add_{pid}")])
         
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
@@ -1363,11 +1369,11 @@ async def main():
     scheduler.add_job(send_daily_deal, "cron", hour=12, minute=0, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
     scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
-    scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1) # Переименовали задачу
+    scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1)
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Избранное, фильтр DLC, любые скидки)!")
+    logger.info("Бот запущен (Избранное, жесткий фильтр DLC/OST, любые скидки)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
