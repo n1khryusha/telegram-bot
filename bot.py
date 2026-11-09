@@ -75,8 +75,8 @@ logger = logging.getLogger("bot")
 
 router = Router()
 PAGE_LIMIT = 50
-WISHLIST_LIMIT_FREE = 1
-WISHLIST_LIMIT_PREMIUM = 10
+FAVORITES_LIMIT_FREE = 3
+FAVORITES_LIMIT_PREMIUM = 20
 
 # ---------- КЭШ КАРТИНОК ----------
 IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
@@ -142,12 +142,12 @@ def db_init():
         product_id INTEGER PRIMARY KEY,
         notified_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE TABLE IF NOT EXISTS wishlist_titles (
+    CREATE TABLE IF NOT EXISTS favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
-        title TEXT COLLATE NOCASE,
+        product_id INTEGER,
         added_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, title)
+        UNIQUE(user_id, product_id)
     );
     CREATE TABLE IF NOT EXISTS link_clicks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,7 +155,7 @@ def db_init():
         link_type TEXT,
         clicked_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE TABLE IF NOT EXISTS notified_wishlist (
+    CREATE TABLE IF NOT EXISTS notified_favorites (
         user_id INTEGER,
         product_id INTEGER,
         notified_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -257,11 +257,11 @@ def add_premium_days(user_id: int, days: int):
     db_query("UPDATE users SET premium_until = ? WHERE user_id = ?", (new_expiry.isoformat(), user_id))
     logger.info(f"[PREMIUM] +{days} дней пользователю {user_id}. Новая дата: {new_expiry}")
 
-def wishlist_limit(user_id: int) -> int:
-    return WISHLIST_LIMIT_PREMIUM if check_premium(user_id) else WISHLIST_LIMIT_FREE
+def favorites_limit(user_id: int) -> int:
+    return FAVORITES_LIMIT_PREMIUM if check_premium(user_id) else FAVORITES_LIMIT_FREE
 
-def wishlist_count(user_id: int) -> int:
-    return db_query("SELECT COUNT(*) FROM wishlist_titles WHERE user_id = ?", (user_id,), fetchone=True)[0]
+def favorites_count(user_id: int) -> int:
+    return db_query("SELECT COUNT(*) FROM favorites WHERE user_id = ?", (user_id,), fetchone=True)[0]
 
 def list_premium_users() -> list:
     return db_query(
@@ -330,10 +330,10 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         logger.warning(f"[PHOTO] {e}")
         return False
 
-# ---------- ПАРСЕР STEAM (УМНЫЙ) ----------
+# ---------- ПАРСЕР STEAM (ФИЛЬТР DLC, ЛЮБЫЕ СКИДКИ) ----------
 async def _steam_get_details(session, app_id):
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=ru&l=russian"
-    result = {"image": "", "description": "", "price_overview": None}
+    result = {"image": "", "description": "", "price_overview": None, "type": "game", "genres": []}
     try:
         async with session.get(details_url, timeout=8) as resp:
             if resp.status == 200:
@@ -343,6 +343,7 @@ async def _steam_get_details(session, app_id):
                     result["image"] = game_data.get("header_image", "")
                     result["description"] = game_data.get("short_description", "")
                     result["price_overview"] = game_data.get("price_overview")
+                    result["type"] = game_data.get("type", "game") # game, dlc, music, software
     except Exception: pass
     return result
 
@@ -381,11 +382,25 @@ async def fetch_steam_deals():
 
     added = 0
     async with aiohttp.ClientSession() as session:
+        items_to_check = []
         for item in data.get("specials", {}).get("items", []):
+            items_to_check.append(item)
+        for section_key in ("top_sellers", "new_releases"):
+            for item in data.get(section_key, {}).get("items", []):
+                items_to_check.append(item)
+
+        for item in items_to_check:
             title, app_id = item.get("name"), item.get("id")
             if not title or not app_id: continue
 
             det = await _steam_get_details(session, app_id)
+            
+            # --- ФИЛЬТРАЦИЯ ---
+            # Только игры (исключаем DLC, музыку, софт)
+            if det["type"] != "game":
+                continue
+                
+            # Проверяем, есть ли вообще скидка (убрали жесткий порог 40%)
             if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
                 continue
 
@@ -400,26 +415,7 @@ async def fetch_steam_deals():
             added += 1
             await asyncio.sleep(0.2)
 
-        for section_key in ("top_sellers", "new_releases"):
-            for item in data.get(section_key, {}).get("items", []):
-                title, app_id = item.get("name"), item.get("id")
-                if not title or not app_id: continue
-
-                det = await _steam_get_details(session, app_id)
-                if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
-                    continue
-
-                if db_query("SELECT 1 FROM products WHERE title = ?", (title,), fetchone=True): continue
-
-                shop_url = f"https://store.steampowered.com/app/{app_id}/"
-                f_str, o_str, d_str = _format_price(det["price_overview"])
-                price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
-
-                db_query("INSERT OR IGNORE INTO products (title, price, old_price, discount, url, image, description, price_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd))
-                added += 1
-                await asyncio.sleep(0.2)
-    logger.info(f"[PARSER] Добавлено новых игр со скидками: {added}")
+    logger.info(f"[PARSER] Добавлено новых игр со скидками (без DLC): {added}")
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
@@ -449,22 +445,20 @@ async def send_daily_deal(bot: Bot):
         await asyncio.sleep(0.07)
     logger.info(f"[DAILY] Отправлено: {sent}, ошибок: {blocked}")
 
-# ---------- УВЕДОМЛЕНИЯ WISHLIST ----------
-async def notify_wishlist_matches(bot: Bot):
-    rows = db_query("SELECT wt.user_id, wt.title FROM wishlist_titles wt JOIN users u ON u.user_id = wt.user_id WHERE u.premium_until > ? AND LENGTH(wt.title) >= 3", (utcnow_iso(),), fetch=True)
+# ---------- УВЕДОМЛЕНИЯ ИЗБРАННОГО ----------
+async def notify_favorites_matches(bot: Bot):
+    # Уведомляем, если игра из Избранного попала в скидки
+    rows = db_query("SELECT f.user_id, p.id, p.title, p.price, p.discount, p.url, p.image, p.description FROM favorites f JOIN products p ON p.id = f.product_id JOIN users u ON u.user_id = f.user_id WHERE u.premium_until > ? AND p.discount IS NOT NULL AND p.discount != '' AND NOT EXISTS (SELECT 1 FROM notified_favorites nf WHERE nf.user_id = f.user_id AND nf.product_id = p.id) LIMIT 50", (utcnow_iso(),), fetch=True)
     if not rows: return
-    for uid, wtitle in rows:
-        pattern = "%" + escape_like(wtitle) + "%"
-        matches = db_query("SELECT p.id, p.title, p.price, p.discount, p.url, p.image, p.description FROM products p WHERE LOWER(p.title) LIKE LOWER(?) ESCAPE '\\' AND p.discount IS NOT NULL AND p.discount != '' AND NOT EXISTS (SELECT 1 FROM notified_wishlist nw WHERE nw.user_id = ? AND nw.product_id = p.id) LIMIT 5", (pattern, uid), fetch=True)
-        for pid, title, price, discount, url, image, desc in matches:
-            text = f"⭐ <b>Твоя игра из Wishlist в скидке!</b>\n\n🎮 {html.escape(title)}\n💵 {price}\n🔥 {discount}\n\n📝 <i>{safe_html_truncate(desc or '', 100)}...</i>"
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)]])
-            ok = await send_game_photo(bot, uid, pid, image, text, kb)
-            if not ok:
-                try: await bot.send_message(chat_id=uid, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-                except Exception: continue
-            db_query("INSERT OR IGNORE INTO notified_wishlist (user_id, product_id) VALUES (?, ?)", (uid, pid))
-            await asyncio.sleep(0.05)
+    for uid, pid, title, price, discount, url, image, desc in rows:
+        text = f"⭐ <b>Игра из Избранного в скидке!</b>\n\n🎮 {html.escape(title)}\n💵 {price}\n🔥 {discount}\n\n📝 <i>{safe_html_truncate(desc or '', 100)}...</i>"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)]])
+        ok = await send_game_photo(bot, uid, pid, image, text, kb)
+        if not ok:
+            try: await bot.send_message(chat_id=uid, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            except Exception: continue
+        db_query("INSERT OR IGNORE INTO notified_favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
+        await asyncio.sleep(0.05)
 
 # ---------- УВЕДОМЛЕНИЯ О СУПЕР-СКИДКАХ ----------
 async def notify_premium_super_deals(bot: Bot):
@@ -517,7 +511,7 @@ def promo_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 # ---------- FSM ----------
-class WishlistFSM(StatesGroup):
+class FavoritesFSM(StatesGroup):
     waiting_title = State()
 
 class TopUpFSM(StatesGroup):
@@ -603,7 +597,7 @@ async def profile_menu(message: Message):
     is_prem = check_premium(uid)
     until = get_premium_until(uid)
     joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
-    w_count, w_limit = wishlist_count(uid), wishlist_limit(uid)
+    f_count, f_limit = favorites_count(uid), favorites_limit(uid)
 
     refs = db_query(
         "SELECT username, first_name FROM users WHERE referred_by = ? ORDER BY joined_at DESC LIMIT 20",
@@ -619,7 +613,7 @@ async def profile_menu(message: Message):
         text += f"👑 Статус: <b>Премиум</b> (до {until.strftime('%d.%m.%Y')})\n⏳ Осталось: <b>{days_left} дн.</b>\n"
     else:
         text += "💎 Статус: <b>Обычный</b>\n"
-    text += f"\n⭐ <b>Wishlist:</b> {w_count} / {w_limit} игр\n"
+    text += f"\n⭐ <b>Избранное:</b> {f_count} / {f_limit} игр\n"
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
 
     if refs:
@@ -632,12 +626,10 @@ async def profile_menu(message: Message):
 
     buttons = [
         [InlineKeyboardButton(text="🎁 Пригласить друга (+3 дня)", callback_data="show_ref_link")],
-        [InlineKeyboardButton(text="⭐ Мой Wishlist", callback_data="wl_show")],
+        [InlineKeyboardButton(text="⭐ Мое Избранное", callback_data="fav_show")],
         [InlineKeyboardButton(text="❤️ Поддержать проект", url=DONATE_URL)],
     ]
-    if w_count < w_limit:
-        buttons.append([InlineKeyboardButton(text="➕ Добавить в Wishlist", callback_data="wl_add_start")])
-
+    
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 # ---------- ПРЕМИУМ (С ОПЛАТОЙ ЗВЕЗДАМИ) ----------
@@ -659,10 +651,10 @@ async def premium_menu(message: Message, user_id: int | None = None):
         "   <i>Крути сколько хочешь и находи лучшие скидки первым.</i>\n\n"
         "🏆 <b>Только топовые скидки</b>\n"
         "   <i>Рулетка выдает игры с максимальным процентом скидки.</i>\n\n"
-        "⭐ <b>Wishlist до 10 игр</b>\n"
+        "⭐ <b>Избранное до 20 игр</b>\n"
         "   <i>Добавляй больше игр в список желаемого.</i>\n\n"
         "🔔 <b>Мгновенные алерты</b>\n"
-        "   <i>Персональные уведомления, как только на игру из Wishlist появляется скидка или цена падает ниже 80%.</i>\n\n"
+        "   <i>Персональные уведомления, как только на игру из Избранного появляется скидка или цена падает ниже 80%.</i>\n\n"
         "🎁 <b>Как получить Премиум БЕСПЛАТНО?</b>\n"
         f"Пригласи друга по своей ссылке и получи <b>+{REF_BONUS_DAYS} дня Премиума</b> за каждого!\n\n"
         f"👥 Ты уже пригласил: <b>{ref_count} чел.</b>\n"
@@ -821,7 +813,7 @@ async def user_promo_check(message: Message, state: FSMContext):
         reply_markup=main_menu_kb()
     )
 
-# ---------- СКИДКИ ----------
+# ---------- СКИДКИ (КАРТОЧКИ ИГР) ----------
 @router.message(F.text == "🔥 Скидки")
 async def discounts_menu(message: Message):
     products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
@@ -841,13 +833,27 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
     global_index = offset + index + 1
     text += f"\n📄 Игра {global_index} из {total}"
+    
+    # Проверяем, добавлена ли игра в избранное
+    uid = message_or_callback.from_user.id
+    is_fav = db_query("SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?", (uid, pid), fetchone=True)
+    
     nav_row = []
     if global_index > 1: nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{global_index - 2}"))
     if global_index < total: nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{global_index}"))
+    
     buttons = []
     if nav_row: buttons.append(nav_row)
     buttons.append([InlineKeyboardButton(text="🛒 Купить в Steam", url=url)])
+    
+    # Кнопка Избранного
+    if is_fav:
+        buttons.append([InlineKeyboardButton(text="✅ В Избранном", callback_data="fav_already")])
+    else:
+        buttons.append([InlineKeyboardButton(text="🔔 Следить за ценой", callback_data=f"fav_add_{pid}")])
+        
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
     if not isinstance(message_or_callback, CallbackQuery):
         ok = await send_game_photo(message_or_callback.bot, message_or_callback.chat.id, pid, image, text, kb)
         if not ok: await message_or_callback.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -890,124 +896,59 @@ async def paginate_products(cb: CallbackQuery):
     if 0 <= index < len(products): await send_product_card(cb, products, index, offset, total)
     else: await cb.answer("Дальше игр нет", show_alert=False)
 
-@router.message(F.text == "🎲 Случайная игра")
-async def random_game(message: Message):
-    user_id = message.from_user.id
-    is_prem = check_premium(user_id)
-    if not is_prem:
-        res = db_query("SELECT last_roulette FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-        last = parse_dt(res[0]) if res else None
-        if last and utcnow() - last < timedelta(days=1):
-            time_left = timedelta(days=1) - (utcnow() - last)
-            h, m = time_left.seconds // 3600, (time_left.seconds % 3600) // 60
-            await message.answer(f"⏳ <b>Лимит рулетки!</b>\n\nОбычные пользователи — 1 раз в день.\nСледующая попытка через: <b>{h} ч. {m} мин.</b>\n\n💎 <b>Купи Премиум</b> — крути без ограничений!")
-            return
-    if is_prem:
-        candidates = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 20", fetch=True)
-        game = random.choice(candidates) if candidates else None
-    else: game = None
-    if not game:
-        game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1", fetchone=True)
-    if not game: await message.answer("В базе пока нет игр."); return
-    db_query("UPDATE users SET last_roulette = ? WHERE user_id = ?", (utcnow_iso(), user_id))
-    pid, title, price, old_price, discount, url, image, description, price_usd = game
-    display_usd = f" (в долларах: {price_usd})" if (price_usd and "руб" not in price_usd.lower() and "₽" not in price_usd) else ""
-    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
-    if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
-    if price: text += f"💵 Цена: <b>{price}</b>{display_usd}\n"
-    if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
-    if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
-    if is_prem: text += "\n👑 <i>Бонус Премиум: максимальная скидка!</i>"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]])
-    ok = await send_game_photo(message.bot, message.chat.id, pid, image, text, kb)
-    if not ok: await message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-@router.callback_query(F.data == "random_again")
-async def random_again(cb: CallbackQuery):
+# ---------- ДОБАВЛЕНИЕ В ИЗБРАННОЕ ----------
+@router.callback_query(F.data.startswith("fav_add_"))
+async def fav_add(cb: CallbackQuery):
     uid = cb.from_user.id
-    is_prem = check_premium(uid)
-    if not is_prem:
-        res = db_query("SELECT last_random_again FROM users WHERE user_id = ?", (uid,), fetchone=True)
-        last = parse_dt(res[0]) if res else None
-        if last and utcnow() - last < timedelta(minutes=10):
-            await cb.answer("⏳ Раз в 10 минут. Купи Премиум — без лимита!", show_alert=True)
-            return
-    if is_prem:
-        game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 1", fetchone=True)
-    else:
-        game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1", fetchone=True)
-    await cb.answer()
-    if not game: await cb.answer("В базе пока пусто", show_alert=True); return
-    if not is_prem: db_query("UPDATE users SET last_random_again = ? WHERE user_id = ?", (utcnow_iso(), uid))
-    pid, title, price, old_price, discount, url, image, description, price_usd = game
-    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
-    if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
-    if price: text += f"💵 Цена: <b>{price}</b>\n"
-    if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
-    if description: text += f"\n📝 <i>{safe_html_truncate(description, 150)}...</i>\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]])
-    ok = await send_game_photo(cb.bot, cb.message.chat.id, pid, image, text, kb)
-    if not ok: await cb.message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-# ---------- WISHLIST ----------
-@router.callback_query(F.data == "wl_add_start")
-async def wl_add_start(cb: CallbackQuery, state: FSMContext):
-    uid = cb.from_user.id
-    limit, count = wishlist_limit(uid), wishlist_count(uid)
+    pid = int(cb.data.split("_")[2])
+    
+    limit = favorites_limit(uid)
+    count = favorites_count(uid)
     if count >= limit:
-        await cb.answer(f"Лимит Wishlist: {limit} игр.\nКупи Премиум, чтобы добавить до 10!", show_alert=True)
+        await cb.answer(f"Лимит Избранного: {limit} игр.\nКупи Премиум, чтобы добавить до 20!", show_alert=True)
         return
-    await state.set_state(WishlistFSM.waiting_title)
-    await cb.message.answer(f"⭐ <b>Добавление в Wishlist</b>\n\nНапиши название игры.\nУ тебя: {count} / {limit} игр.\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="wl_cancel")]]))
-    await cb.answer()
+    
+    db_query("INSERT OR IGNORE INTO favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
+    await cb.answer("✅ Игра добавлена в Избранное! Теперь ты получишь уведомление, если на нее будет скидка.")
+    
+    # Обновляем карточку
+    products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE id = ?", (pid,), fetch=True)
+    if products:
+        total = db_query("SELECT COUNT(*) FROM products WHERE image IS NOT NULL AND image != ''", fetchone=True)[0]
+        # Просто перерисовываем текущую карточку
+        await send_product_card(cb, products, 0, 0, total)
 
-@router.callback_query(F.data == "wl_cancel")
-async def wl_cancel(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    try: await cb.message.edit_text("❌ Добавление отменено.")
-    except Exception: pass
-    await cb.answer()
+@router.callback_query(F.data == "fav_already")
+async def fav_already(cb: CallbackQuery):
+    await cb.answer("✅ Эта игра уже в твоем Избранном!")
 
-@router.message(WishlistFSM.waiting_title)
-async def wl_add_title(message: Message, state: FSMContext):
-    raw = normalize_title(message.text or "")
-    if raw.lower() in ("отмена", "cancel", "/cancel"):
-        await state.clear(); await message.answer("❌ Отменено.", reply_markup=main_menu_kb()); return
-    if len(raw) < 2: await message.answer("Слишком короткое название. Попробуй ещё раз или напиши «отмена»."); return
-    if len(raw) > 200: await message.answer("Слишком длинное название. Попробуй ещё раз или напиши «отмена»."); return
-    uid = message.from_user.id
-    limit, count = wishlist_limit(uid), wishlist_count(uid)
-    if count >= limit: await state.clear(); await message.answer(f"❌ Достигнут лимит Wishlist ({limit} игр).", reply_markup=main_menu_kb()); return
-    existing = db_query("SELECT id FROM wishlist_titles WHERE user_id = ? AND LOWER(title) = LOWER(?)", (uid, raw), fetchone=True)
-    if existing: await state.clear(); await message.answer(f"⚠️ <b>{html.escape(raw)}</b> уже есть в Wishlist.", reply_markup=main_menu_kb()); return
-    db_query("INSERT OR IGNORE INTO wishlist_titles (user_id, title) VALUES (?, ?)", (uid, raw))
-    await state.clear()
-    await message.answer(f"✅ <b>{html.escape(raw)}</b> добавлено в Wishlist!\nСейчас у тебя: {count + 1} / {limit} игр.", reply_markup=main_menu_kb())
-
-@router.callback_query(F.data == "wl_show")
-async def wl_show(cb: CallbackQuery):
+@router.callback_query(F.data == "fav_show")
+async def fav_show(cb: CallbackQuery):
     uid = cb.from_user.id
-    limit = wishlist_limit(uid)
-    rows = db_query("SELECT id, title FROM wishlist_titles WHERE user_id = ? ORDER BY id", (uid,), fetch=True)
-    if not rows: await cb.answer("Wishlist пуст", show_alert=True); return
-    text = f"⭐ <b>Твой Wishlist</b> ({len(rows)} / {limit}):\n\n"
+    limit = favorites_limit(uid)
+    rows = db_query("SELECT p.id, p.title FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ? ORDER BY f.id", (uid,), fetch=True)
+    if not rows:
+        await cb.answer("Твое Избранное пусто", show_alert=True)
+        return
+    text = f"⭐ <b>Твое Избранное</b> ({len(rows)} / {limit}):\n\n"
     buttons = []
-    for wid, title in rows:
+    for pid, title in rows:
         text += f"• {html.escape(title)}\n"
-        buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {title[:25]}", callback_data=f"wl_del_{wid}")])
+        buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {title[:25]}", callback_data=f"fav_del_{pid}")])
     if not check_premium(uid):
-        text += "\n💎 Хочешь до 10 игр + уведомления о скидках? Пригласи друга!"
+        text += "\n💎 Хочешь до 20 игр + уведомления о скидках? Купи Премиум!"
         buttons.append([InlineKeyboardButton(text="💎 Премиум", callback_data="premium_show")])
     try: await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except TelegramBadRequest: await cb.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await cb.answer()
 
-@router.callback_query(F.data.startswith("wl_del_"))
-async def wl_del(cb: CallbackQuery):
-    try: wid = int(cb.data.split("_", 2)[2])
+@router.callback_query(F.data.startswith("fav_del_"))
+async def fav_del(cb: CallbackQuery):
+    try: pid = int(cb.data.split("_", 2)[2])
     except (IndexError, ValueError): await cb.answer("Ошибка"); return
-    db_query("DELETE FROM wishlist_titles WHERE id = ? AND user_id = ?", (wid, cb.from_user.id))
-    await cb.answer("Удалено"); await wl_show(cb)
+    db_query("DELETE FROM favorites WHERE product_id = ? AND user_id = ?", (pid, cb.from_user.id))
+    await cb.answer("Удалено из Избранного")
+    await fav_show(cb)
 
 # ---------- ПОПОЛНЕНИЕ STEAM ----------
 @router.message(F.text == "💳 Пополнить Steam")
@@ -1130,7 +1071,7 @@ async def stats(message: Message):
     if not is_admin(message.from_user.id): return
     users = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
     products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
-    wish = db_query("SELECT COUNT(*) FROM wishlist_titles", fetchone=True)[0]
+    wish = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
     steam_clicks = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'steam%'", fetchone=True)[0]
     mobile_clicks = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'mobile%'", fetchone=True)[0]
     prem_list = list_premium_users()
@@ -1143,7 +1084,7 @@ async def stats(message: Message):
                 days_left = (dt - utcnow()).days
                 text_prem += f"  • <code>{uid}</code> — {days_left} дн.\n"
         if prem_count > 10: text_prem += f"  ... и ещё {prem_count - 10}\n"
-    await message.answer(f"📊 <b>Статистика</b>\n\n👥 Всего юзеров: {users}\n🎮 Игр: {products}\n⭐ Wishlist записей: {wish}\n💳 Кликов Steam: {steam_clicks}\n📱 Кликов Mobile: {mobile_clicks}\n{text_prem}", reply_markup=admin_menu_kb())
+    await message.answer(f"📊 <b>Статистика</b>\n\n👥 Всего юзеров: {users}\n🎮 Игр: {products}\n⭐ Избранное (записей): {wish}\n💳 Кликов Steam: {steam_clicks}\n📱 Кликов Mobile: {mobile_clicks}\n{text_prem}", reply_markup=admin_menu_kb())
 
 @router.message(F.text == "👥 Рефералы")
 async def admin_refs(message: Message):
@@ -1422,11 +1363,11 @@ async def main():
     scheduler.add_job(send_daily_deal, "cron", hour=12, minute=0, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
     scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
-    scheduler.add_job(notify_wishlist_matches, "interval", minutes=30, args=[bot], max_instances=1)
+    scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1) # Переименовали задачу
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Премиум: 7д/30д/6мес/год, оплата в Telegram Stars, реф +3 дня)!")
+    logger.info("Бот запущен (Избранное, фильтр DLC, любые скидки)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
