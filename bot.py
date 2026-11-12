@@ -219,7 +219,8 @@ def db_init():
     CREATE INDEX IF NOT EXISTS idx_products_discount ON products(discount);
     CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until);
     """)
-    # Миграции
+    
+    # ============ МИГРАЦИИ (исправления для старых баз) ============
     cur.execute("PRAGMA table_info(users)")
     cols = {row[1] for row in cur.fetchall()}
     if "referred_by" not in cols:
@@ -237,7 +238,29 @@ def db_init():
         cur.execute("ALTER TABLE products ADD COLUMN genres TEXT")
     if "last_updated" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN last_updated TEXT")
+    
+    # КРИТИЧНО: Проверяем, есть ли UNIQUE индекс на title
+    # Если старая база создавалась без UNIQUE — ON CONFLICT упадёт.
+    try:
+        cur.execute("PRAGMA index_list(products)")
+        indexes = cur.fetchall()
+        has_unique_title = False
+        for idx in indexes:
+            if idx[2] == 1:  # 1 = unique
+                cur.execute(f"PRAGMA index_info({idx[1]})")
+                idx_cols = [c[2] for c in cur.fetchall()]
+                if "title" in idx_cols:
+                    has_unique_title = True
+                    break
+        
+        if not has_unique_title:
+            logger.info("[DB] Создаю уникальный индекс на title...")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_title ON products(title)")
+    except Exception as e:
+        logger.warning(f"[DB] Не удалось создать уникальный индекс: {e}")
+    
     _db_conn.commit()
+    logger.info("[DB] База данных инициализирована и мигрирована.")
 
 def db_query(sql, params=(), fetch=False, fetchone=False):
     with _db_lock:
@@ -533,20 +556,24 @@ async def fetch_steam_deals():
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
             now_str = utcnow_iso()
 
-            db_query("""
-                INSERT INTO products (title, price, old_price, discount, url, image, description, price_usd, genres, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(title) DO UPDATE SET
-                    price=excluded.price,
-                    old_price=excluded.old_price,
-                    discount=excluded.discount,
-                    image=excluded.image,
-                    description=excluded.description,
-                    genres=excluded.genres,
-                    last_updated=excluded.last_updated
-            """, (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd, det["genres"], now_str))
+            # Оборачиваем в try/except, чтобы одна битая игра не сломала весь парсинг
+            try:
+                db_query("""
+                    INSERT INTO products (title, price, old_price, discount, url, image, description, price_usd, genres, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(title) DO UPDATE SET
+                        price=excluded.price,
+                        old_price=excluded.old_price,
+                        discount=excluded.discount,
+                        image=excluded.image,
+                        description=excluded.description,
+                        genres=excluded.genres,
+                        last_updated=excluded.last_updated
+                """, (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd, det["genres"], now_str))
+                added += 1
+            except Exception as e:
+                logger.error(f"[PARSER] Ошибка вставки «{title}»: {e}")
             
-            added += 1
             await asyncio.sleep(0.2)
 
     logger.info(f"[PARSER] Обновлено/добавлено игр: {added}")
@@ -684,16 +711,22 @@ class ReviewFSM(StatesGroup):
 class SearchFSM(StatesGroup):
     waiting_query = State()
 
-# ---------- ERROR HANDLER ----------
-async def errors_handler(event, exception: Exception, bot: Bot):
+# ---------- ERROR HANDLER (ИСПРАВЛЕН) ----------
+async def errors_handler(event, exception: Exception = None, bot: Bot = None):
+    # В новых версиях aiogram exception может приходить в event, а не в аргументе
+    if exception is None and hasattr(event, 'exception'):
+        exception = event.exception
+    
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
+    
     # Пытаемся отправить сообщение пользователю
     try:
         if hasattr(event, 'message') and event.message:
             await event.message.answer("⚠️ Что-то пошло не так. Попробуйте еще раз или напишите в поддержку.")
         elif hasattr(event, 'callback_query') and event.callback_query:
             await event.callback_query.answer("⚠️ Ошибка. Попробуйте еще раз.", show_alert=True)
-    except Exception: pass
+    except Exception: 
+        pass
     return True
 
 # ---------- ГЛОБАЛЬНЫЙ /CANCEL ----------
@@ -1861,5 +1894,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
