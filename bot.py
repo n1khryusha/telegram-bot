@@ -54,7 +54,6 @@ STARS_30_DAYS  = 350
 STARS_180_DAYS = 1500
 STARS_365_DAYS = 2500
 
-# --- ВОДЯНОЙ ЗНАК ---
 LOGO_PATH = "logo.png" # Файл логотипа должен лежать в папке с ботом
 # ===================================
 
@@ -334,15 +333,13 @@ async def download_image(url: str) -> bytes | None:
                 if resp.status != 200: return None
                 data = await resp.read()
                 if not data or len(data) < 100: return None
-                
-                # Не кэшируем оригинал, чтобы накладывать вотермарк при каждой отправке
                 return data
     except Exception as e:
         logger.warning(f"[IMG] {e}")
         return None
 
 def apply_watermark(image_bytes: bytes) -> bytes:
-    """Накладывает логотип и текст на картинку."""
+    """Накладывает логотип и текст на картинку в левом верхнем углу."""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = img.size
@@ -350,36 +347,40 @@ def apply_watermark(image_bytes: bytes) -> bytes:
         watermark = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(watermark)
         
-        # 1. Логотип
+        # --- 1. ЛОГОТИП ---
+        logo_x, logo_y = 20, 20 # Левый верхний угол
         if os.path.exists(LOGO_PATH):
             try:
                 logo = Image.open(LOGO_PATH).convert("RGBA")
                 logo.thumbnail((60, 60), Image.Resampling.LANCZOS)
                 
-                logo_x = width - logo.width - 20
-                logo_y = height - logo.height - 20
-                
                 watermark.paste(logo, (logo_x, logo_y), logo)
             except Exception as e:
                 logger.warning(f"[Watermark] Ошибка загрузки логотипа: {e}")
 
-        # 2. Текст
+        # --- 2. ТЕКСТ С ОБВОДКОЙ ---
         try:
             font = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
         except IOError:
             font = ImageFont.load_default()
             
         text = "BeaconKeys"
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
         
-        text_x = width - text_width - 90 
-        text_y = height - text_height - 35
+        # Позиция текста: прямо под логотипом
+        text_x = logo_x + 5
+        text_y = logo_y + 70 
         
-        draw.text((text_x + 1, text_y + 1), text, font=font, fill=(0, 0, 0, 200))
+        # Рисуем обводку (черный контур)
+        stroke_width = 3
+        for dx in range(-stroke_width, stroke_width + 1):
+            for dy in range(-stroke_width, stroke_width + 1):
+                if dx != 0 or dy != 0:
+                    draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0, 255))
+        
+        # Рисуем сам текст (белый)
         draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
         
+        # --- 3. ОБЪЕДИНЯЕМ ---
         out = Image.alpha_composite(img, watermark)
         
         output = io.BytesIO()
@@ -407,7 +408,6 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
     data = await download_image(image_url)
     if not data: return False
     
-    # Накладываем водяной знак
     data = apply_watermark(data)
     
     try:
@@ -1715,7 +1715,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Водяной знак на картинках)!")
+    logger.info("Бот запущен (Водяной знак в левом верхнем углу)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
