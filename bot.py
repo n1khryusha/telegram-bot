@@ -339,7 +339,7 @@ async def download_image(url: str) -> bytes | None:
         return None
 
 def apply_watermark(image_bytes: bytes) -> bytes:
-    """Накладывает логотип и текст на картинку в левом верхнем углу."""
+    """Накладывает логотип в левый верхний угол, а текст — в левый нижний."""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = img.size
@@ -347,26 +347,36 @@ def apply_watermark(image_bytes: bytes) -> bytes:
         watermark = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(watermark)
         
-        # --- 1. ЛОГОТИП ---
+        # --- 1. ЛОГОТИП (Левый верхний угол) ---
         logo_x, logo_y = 15, 15
         if os.path.exists(LOGO_PATH):
             try:
                 logo = Image.open(LOGO_PATH).convert("RGBA")
-                logo.thumbnail((50, 50), Image.Resampling.LANCZOS) 
+                logo.thumbnail((60, 60), Image.Resampling.LANCZOS)
+                
+                # Тень под логотип
+                shadow = Image.new("RGBA", logo.size, (0, 0, 0, 0))
+                shadow.paste((0, 0, 0, 150), (0, 0, logo.width, logo.height), logo)
+                watermark.paste(shadow, (logo_x + 2, logo_y + 2), shadow)
+                
                 watermark.paste(logo, (logo_x, logo_y), logo)
             except Exception as e:
                 logger.warning(f"[Watermark] Ошибка загрузки логотипа: {e}")
 
-        # --- 2. ТЕКСТ С ОБВОДКОЙ (УМЕНЬШЕННЫЙ) ---
+        # --- 2. ТЕКСТ С ОБВОДКОЙ (Левый нижний угол) ---
         try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16) 
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18) 
         except IOError:
             font = ImageFont.load_default()
             
         text = "BeaconKeys"
         
-        text_x = logo_x + 5
-        text_y = logo_y + 55 
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        text_x = 20
+        text_y = height - text_height - 20 
         
         stroke_width = 2
         for dx in range(-stroke_width, stroke_width + 1):
@@ -1711,7 +1721,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Водяной знак в левом верхнем углу, уменьшенный текст)!")
+    logger.info("Бот запущен (Водяной знак в левом верхнем углу, текст в левом нижнем)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
