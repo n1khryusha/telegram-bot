@@ -54,7 +54,7 @@ STARS_30_DAYS  = 350
 STARS_180_DAYS = 1500
 STARS_365_DAYS = 2500
 
-LOGO_PATH = "logo.png" # Файл логотипа должен лежать в папке с ботом
+LOGO_PATH = "logo.png" 
 # ===================================
 
 if not BOT_TOKEN:
@@ -348,36 +348,32 @@ def apply_watermark(image_bytes: bytes) -> bytes:
         draw = ImageDraw.Draw(watermark)
         
         # --- 1. ЛОГОТИП ---
-        logo_x, logo_y = 20, 20 # Левый верхний угол
+        logo_x, logo_y = 15, 15
         if os.path.exists(LOGO_PATH):
             try:
                 logo = Image.open(LOGO_PATH).convert("RGBA")
-                logo.thumbnail((60, 60), Image.Resampling.LANCZOS)
-                
+                logo.thumbnail((50, 50), Image.Resampling.LANCZOS) 
                 watermark.paste(logo, (logo_x, logo_y), logo)
             except Exception as e:
                 logger.warning(f"[Watermark] Ошибка загрузки логотипа: {e}")
 
-        # --- 2. ТЕКСТ С ОБВОДКОЙ ---
+        # --- 2. ТЕКСТ С ОБВОДКОЙ (УМЕНЬШЕННЫЙ) ---
         try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16) 
         except IOError:
             font = ImageFont.load_default()
             
         text = "BeaconKeys"
         
-        # Позиция текста: прямо под логотипом
         text_x = logo_x + 5
-        text_y = logo_y + 70 
+        text_y = logo_y + 55 
         
-        # Рисуем обводку (черный контур)
-        stroke_width = 3
+        stroke_width = 2
         for dx in range(-stroke_width, stroke_width + 1):
             for dy in range(-stroke_width, stroke_width + 1):
                 if dx != 0 or dy != 0:
                     draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0, 255))
         
-        # Рисуем сам текст (белый)
         draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
         
         # --- 3. ОБЪЕДИНЯЕМ ---
@@ -1715,7 +1711,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Водяной знак в левом верхнем углу)!")
+    logger.info("Бот запущен (Водяной знак в левом верхнем углу, уменьшенный текст)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
