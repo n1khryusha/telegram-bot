@@ -85,7 +85,7 @@ AVAILABLE_GENRES = [
     "Shooter", "Fighting", "Stealth", "Arcade", "Visual Novel"
 ]
 
-# ---------- КЭШ КАРТИНОК (ИСПРАВЛЕН) ----------
+# ---------- КЭШ КАРТИНОК ----------
 IMAGE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024
 _image_cache_size = 0
@@ -338,7 +338,6 @@ async def download_image(url: str) -> bytes | None:
                 data = await resp.read()
                 if not data or len(data) < 100: return None
                 
-                # Логика кэша
                 while _image_cache_size + len(data) > IMAGE_CACHE_MAX_BYTES and IMAGE_CACHE:
                     _, old = IMAGE_CACHE.popitem(last=False)
                     _image_cache_size -= len(old)
@@ -434,7 +433,7 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         logger.warning(f"[PHOTO] {e}")
         return False
 
-# ---------- ПАРСЕР STEAM (С ON CONFLICT) ----------
+# ---------- ПАРСЕР STEAM ----------
 async def _steam_get_details(session, app_id):
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=ru&l=russian"
     result = {"image": "", "description": "", "price_overview": None, "type": "game", "genres": ""}
@@ -516,7 +515,6 @@ async def fetch_steam_deals():
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
             now_str = utcnow_iso()
 
-            # 1.3 ИСПРАВЛЕНИЕ: ON CONFLICT DO UPDATE (обновляем цену, если игра уже есть)
             db_query("""
                 INSERT INTO products (title, price, old_price, discount, url, image, description, price_usd, genres, last_updated)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -534,28 +532,6 @@ async def fetch_steam_deals():
             await asyncio.sleep(0.2)
 
     logger.info(f"[PARSER] Обновлено/добавлено игр: {added}")
-
-# ---------- ОЧИСТКА УСТАРЕВШИХ СКИДОК (1.4) ----------
-async def update_stale_prices():
-    """Раз в 6 часов проверяем игры, которые давно не обновлялись."""
-    logger.info("[CLEANUP] Начинаем проверку устаревших скидок...")
-    
-    # Берем игры, которые не проверялись более 6 часов
-    rows = db_query("SELECT id, title FROM products WHERE last_updated < ? OR last_updated IS NULL LIMIT 50", 
-                    ((utcnow() - timedelta(hours=6)).isoformat(),), fetch=True)
-    
-    if not rows: return
-    
-    headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession() as session:
-        for pid, title in rows:
-            # Ищем игру в Steam по названию (через поиск app_id)
-            # В реальности лучше хранить app_id в БД, но для простоты используем поиск.
-            # Т.к. app_id нет, мы просто удаляем старые записи, чтобы они не висели.
-            # В идеале нужно добавить колонку app_id и запрашивать appdetails.
-            
-            # Пока просто удаляем игры, которые не обновились за 24 часа
-            pass
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
@@ -683,13 +659,18 @@ async def errors_handler(event, exception: Exception, bot: Bot):
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
     return True
 
-# ---------- СТАРТ (ИСПРАВЛЕНА РЕФЕРАЛЬНАЯ ГОНКА) ----------
+# ---------- ГЛОБАЛЬНЫЙ /CANCEL ----------
+@router.message(Command("cancel"))
+async def global_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Действие отменено.", reply_markup=main_menu_kb())
+
+# ---------- СТАРТ ----------
 @router.message(CommandStart())
 async def start_cmd(message: Message, command: CommandObject):
     text = message.text or ""
     referrer_id = None
 
-    # 1.7 ИСПРАВЛЕНИЕ: Берем аргумент из CommandObject, а не из текста
     if command.args and command.args.startswith("ref_"):
         try:
             referrer_id = int(command.args[4:])
@@ -698,10 +679,8 @@ async def start_cmd(message: Message, command: CommandObject):
 
     logger.info(f"[START] User: {message.from_user.id}, Referrer: {referrer_id}")
 
-    # 1.2 ИСПРАВЛЕНИЕ: Транзакция для защиты от гонки
     with _db_lock:
         cur = _db_conn.cursor()
-        # Пытаемся вставить. Если юзер уже есть — ничего не делаем (rowcount = 0)
         cur.execute(
             "INSERT OR IGNORE INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)",
             (message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
@@ -711,7 +690,6 @@ async def start_cmd(message: Message, command: CommandObject):
 
     if is_new:
         logger.info(f"[START] New user created: {message.from_user.id}")
-        # Проверяем, существует ли реферер
         if referrer_id and referrer_id != message.from_user.id:
             ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
             if ref_row:
@@ -740,14 +718,14 @@ async def start_cmd(message: Message, command: CommandObject):
         reply_markup=main_menu_kb(),
     )
 
-# ---------- ПОИСК (3.1) ----------
+# ---------- ПОИСК ----------
 @router.message(F.text == "🔍 Поиск")
 async def search_start(message: Message, state: FSMContext):
     await state.set_state(SearchFSM.waiting_query)
     await message.answer("🔍 <b>Поиск игр</b>\n\nВведите название игры, которую хотите найти:\n\n<i>Напишите «отмена», чтобы выйти.</i>",
                          reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
 
-@router.message(SearchFSM.waiting_query, F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
+@router.message(SearchFSM.waiting_query, F.text.in_(["⬅️ Отмена", "отмена", "Отмена", "/cancel"]))
 async def search_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Поиск отменен.", reply_markup=main_menu_kb())
@@ -759,7 +737,6 @@ async def search_results(message: Message, state: FSMContext):
         await message.answer("⚠️ Введите название игры.")
         return
 
-    # 1.1 ИСПРАВЛЕНИЕ: Используем escape_like
     pattern = f"%{escape_like(query)}%"
     rows = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE LOWER(title) LIKE LOWER(?) ESCAPE '\\' LIMIT 10", (pattern,), fetch=True)
     
@@ -1137,7 +1114,6 @@ async def user_promo_check(message: Message, state: FSMContext):
 
     days, max_uses, uses_count, expires_at = promo
     
-    # 3.10 ИСПРАВЛЕНИЕ: Проверка TTL
     if expires_at:
         exp_date = parse_dt(expires_at)
         if exp_date and utcnow() > exp_date:
@@ -1305,7 +1281,6 @@ async def random_game(message: Message):
     user_id = message.from_user.id
     is_prem = check_premium(user_id)
     
-    # 1.5 ИСПРАВЛЕНИЕ: Привязка к календарному дню
     if not is_prem:
         res = db_query("SELECT last_roulette FROM users WHERE user_id = ?", (user_id,), fetchone=True)
         last_str = res[0] if res else None
@@ -1648,7 +1623,7 @@ async def admin_promo_create_max_uses(message: Message, state: FSMContext):
     data = await state.get_data()
     code = data.get("code")
     days = data.get("days")
-    expires_at = (utcnow() + timedelta(days=30)).isoformat() # TTL 30 дней
+    expires_at = (utcnow() + timedelta(days=30)).isoformat()
 
     db_query("INSERT INTO promocodes (code, days, max_uses, expires_at) VALUES (?, ?, ?, ?)", (code, days, max_uses, expires_at))
     await state.clear()
@@ -1745,7 +1720,7 @@ async def admin_prem_cancel(cb: CallbackQuery, state: FSMContext):
     except Exception: pass
     await cb.answer()
 
-# ---------- РАССЫЛКА (ИСПРАВЛЕНА С RETRY AFTER) ----------
+# ---------- РАССЫЛКА ----------
 @router.message(F.text == "📢 Рассылка")
 async def admin_broadcast_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
@@ -1792,7 +1767,6 @@ async def admin_broadcast_send(cb: CallbackQuery, state: FSMContext, bot: Bot):
             else: await bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
             sent += 1
         except TelegramRetryAfter as e:
-            # 1.6 ИСПРАВЛЕНИЕ: Ждем и пробуем снова
             logger.warning(f"[BC] Flood control: waiting {e.retry_after} sec")
             await asyncio.sleep(e.retry_after)
             try:
@@ -1823,11 +1797,10 @@ async def main():
     scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
     scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
     scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1)
-    # scheduler.add_job(update_stale_prices, "interval", hours=6) # Добавить после реализации
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Обновлен: транзакции, поиск, TTL, retry_after)!")
+    logger.info("Бот запущен (Исправлена кнопка Отмена)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
