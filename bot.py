@@ -9,6 +9,7 @@ import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
+import io
 
 import aiohttp
 from aiogram import Bot, Dispatcher, Router, F
@@ -28,6 +29,7 @@ from aiogram.types import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
 
 # ============ НАСТРОЙКИ ============
 load_dotenv()
@@ -36,29 +38,24 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 LOG_PATH = os.getenv("LOG_PATH", "/data/bot.log")
-# ID чата для отзывов
 REVIEW_CHAT_ID = int(os.getenv("REVIEW_CHAT_ID", "-1004296458172"))
 
-# --- PLATI.MARKET ---
 PLATI_AGENT_ID = os.getenv("PLATI_AGENT_ID", "1480092")
 PLATI_SUPPORT = os.getenv("PLATI_SUPPORT", "@ObuzaMeduza")
 STEAM_TOPUP_ITEM_ID = os.getenv("STEAM_TOPUP_ITEM_ID", "3961593")
 
-# --- РЕФЕРАЛЬНАЯ СИСТЕМА ---
 REF_BONUS_DAYS = 3
-
-# --- КОНТАКТЫ ---
 CONTACT_TG = "@ObuzaMeduza"
 CONTACT_EMAIL = "nikhrushawork@gmail.com"
-
-# --- ДОНАТ (DA LINK) ---
 DONATE_URL = "https://dalink.to/beaconkeys"
 
-# --- ЦЕНЫ В ЗВЕЗДАХ ---
-STARS_7_DAYS   = 150    # 7 дней
-STARS_30_DAYS  = 350    # 30 дней
-STARS_180_DAYS = 1500   # 6 месяцев (180 дней)
-STARS_365_DAYS = 2500   # 1 год (365 дней)
+STARS_7_DAYS   = 150
+STARS_30_DAYS  = 350
+STARS_180_DAYS = 1500
+STARS_365_DAYS = 2500
+
+# --- ВОДЯНОЙ ЗНАК ---
+LOGO_PATH = "logo.png" # Файл логотипа должен лежать в папке с ботом
 # ===================================
 
 if not BOT_TOKEN:
@@ -82,7 +79,6 @@ FAVORITES_LIMIT_PREMIUM = 20
 GENRES_LIMIT_FREE = 3
 GENRES_LIMIT_PREMIUM = 10
 
-# Расширенный список доступных жанров
 AVAILABLE_GENRES = [
     "Action", "Adventure", "RPG", "Strategy", "Simulation", 
     "Indie", "Massively Multiplayer", "Casual", "Racing", "Sports",
@@ -312,7 +308,6 @@ def get_user_genres(user_id: int) -> list:
     return [row[0] for row in rows]
 
 def toggle_user_genre(user_id: int, genre: str) -> str:
-    """Возвращает 'added', 'removed' или 'limit'."""
     current = get_user_genres(user_id)
     limit = GENRES_LIMIT_PREMIUM if check_premium(user_id) else GENRES_LIMIT_FREE
     
@@ -325,7 +320,7 @@ def toggle_user_genre(user_id: int, genre: str) -> str:
         db_query("INSERT OR IGNORE INTO user_genres (user_id, genre) VALUES (?, ?)", (user_id, genre))
         return "added"
 
-# ---------- СКАЧИВАНИЕ КАРТИНОК ----------
+# ---------- СКАЧИВАНИЕ И ОБРАБОТКА КАРТИНОК ----------
 async def download_image(url: str) -> bytes | None:
     global _image_cache_size
     if not url: return None
@@ -339,30 +334,82 @@ async def download_image(url: str) -> bytes | None:
                 if resp.status != 200: return None
                 data = await resp.read()
                 if not data or len(data) < 100: return None
-                while _image_cache_size + len(data) > IMAGE_CACHE_MAX_BYTES and IMAGE_CACHE:
-                    _, old = IMAGE_CACHE.popitem(last=False)
-                    _image_cache_size -= len(old)
-                IMAGE_CACHE[url] = data
-                _image_cache_size += len(data)
+                
+                # Не кэшируем оригинал, чтобы накладывать вотермарк при каждой отправке
                 return data
     except Exception as e:
         logger.warning(f"[IMG] {e}")
         return None
+
+def apply_watermark(image_bytes: bytes) -> bytes:
+    """Накладывает логотип и текст на картинку."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        width, height = img.size
+        
+        watermark = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(watermark)
+        
+        # 1. Логотип
+        if os.path.exists(LOGO_PATH):
+            try:
+                logo = Image.open(LOGO_PATH).convert("RGBA")
+                logo.thumbnail((60, 60), Image.Resampling.LANCZOS)
+                
+                logo_x = width - logo.width - 20
+                logo_y = height - logo.height - 20
+                
+                watermark.paste(logo, (logo_x, logo_y), logo)
+            except Exception as e:
+                logger.warning(f"[Watermark] Ошибка загрузки логотипа: {e}")
+
+        # 2. Текст
+        try:
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
+        except IOError:
+            font = ImageFont.load_default()
+            
+        text = "BeaconKeys"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        text_x = width - text_width - 90 
+        text_y = height - text_height - 35
+        
+        draw.text((text_x + 1, text_y + 1), text, font=font, fill=(0, 0, 0, 200))
+        draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
+        
+        out = Image.alpha_composite(img, watermark)
+        
+        output = io.BytesIO()
+        out.convert("RGB").save(output, format="JPEG", quality=90)
+        return output.getvalue()
+    except Exception as e:
+        logger.error(f"[Watermark] Ошибка наложения: {e}")
+        return image_bytes
 
 async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_url: str | None, caption: str, reply_markup) -> bool:
     tg_file_id = None
     if product_id:
         row = db_query("SELECT tg_file_id FROM products WHERE id = ?", (product_id,), fetchone=True)
         if row and row[0]: tg_file_id = row[0]
+    
     if tg_file_id:
         try:
             await bot.send_photo(chat_id=chat_id, photo=tg_file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             return True
         except TelegramBadRequest:
             if product_id: db_query("UPDATE products SET tg_file_id = NULL WHERE id = ?", (product_id,))
+            
     if not image_url: return False
+    
     data = await download_image(image_url)
     if not data: return False
+    
+    # Накладываем водяной знак
+    data = apply_watermark(data)
+    
     try:
         msg = await bot.send_photo(chat_id=chat_id, photo=BufferedInputFile(data, filename="game.jpg"), caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
         if product_id and msg.photo:
@@ -372,7 +419,7 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         logger.warning(f"[PHOTO] {e}")
         return False
 
-# ---------- ПАРСЕР STEAM (С ЖАНРАМИ) ----------
+# ---------- ПАРСЕР STEAM ----------
 async def _steam_get_details(session, app_id):
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=ru&l=russian"
     result = {"image": "", "description": "", "price_overview": None, "type": "game", "genres": ""}
@@ -524,13 +571,9 @@ async def notify_premium_super_deals(bot: Bot):
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            # Ряд 1
             [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра"), KeyboardButton(text="💳 Пополнить Steam")],
-            # Ряд 2
             [KeyboardButton(text="📱 Мобильные игры"), KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            # Ряд 3
             [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="⭐ Оставить отзыв"), KeyboardButton(text="📢 Реклама")],
-            # Ряд 4
             [KeyboardButton(text="❤️ Поддержать"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
@@ -843,7 +886,7 @@ async def review_text(message: Message, state: FSMContext, bot: Bot):
             reply_markup=main_menu_kb()
         )
 
-# ---------- ПРЕМИУМ (С ОПЛАТОЙ ЗВЕЗДАМИ) ----------
+# ---------- ПРЕМИУМ ----------
 async def premium_menu(message: Message, user_id: int | None = None):
     uid = user_id if user_id is not None else message.from_user.id
     is_prem = check_premium(uid)
@@ -891,7 +934,6 @@ async def premium_show(cb: CallbackQuery):
     await cb.answer()
     if cb.message: await premium_menu(cb.message, user_id=cb.from_user.id)
 
-# ---------- ОПЛАТА ЗВЕЗДАМИ (TELEGRAM STARS) ----------
 @router.callback_query(F.data.startswith("buy_premium_"))
 async def buy_premium_stars(cb: CallbackQuery):
     try:
@@ -929,12 +971,10 @@ async def buy_premium_stars(cb: CallbackQuery):
         logger.error(f"Ошибка создания счета: {e}")
         await cb.answer("❌ Ошибка создания счета. Попробуйте позже.", show_alert=True)
 
-# ---------- ПРОВЕРКА ПЕРЕД ОПЛАТОЙ ----------
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
     await pre_checkout_q.answer(ok=True)
 
-# ---------- УСПЕШНАЯ ОПЛАТА ----------
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     payment_info: SuccessfulPayment = message.successful_payment
@@ -1026,7 +1066,7 @@ async def user_promo_check(message: Message, state: FSMContext):
         reply_markup=main_menu_kb()
     )
 
-# ---------- СКИДКИ (КАРТОЧКИ ИГР) ----------
+# ---------- СКИДКИ ----------
 @router.message(F.text == "🔥 Скидки")
 async def discounts_menu(message: Message):
     products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
@@ -1080,7 +1120,9 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
             media = row[0] if row and row[0] else None
             if media is None:
                 data = await download_image(image)
-                if data: media = BufferedInputFile(data, filename="game.jpg")
+                if data: 
+                    data = apply_watermark(data)
+                    media = BufferedInputFile(data, filename="game.jpg")
             if media:
                 await msg.edit_media(media=InputMediaPhoto(media=media, caption=text, parse_mode=ParseMode.HTML), reply_markup=kb)
                 return
@@ -1159,7 +1201,7 @@ async def fav_del(cb: CallbackQuery):
     await cb.answer("Удалено из Избранного")
     await fav_show(cb)
 
-# ---------- СЛУЧАЙНАЯ ИГРА (С УЧЕТОМ ЖАНРОВ) ----------
+# ---------- СЛУЧАЙНАЯ ИГРА ----------
 @router.message(F.text == "🎲 Случайная игра")
 async def random_game(message: Message):
     user_id = message.from_user.id
@@ -1414,7 +1456,7 @@ async def admin_refs(message: Message):
 
     await message.answer(text, reply_markup=admin_menu_kb())
 
-# ---------- УПРАВЛЕНИЕ ПРОМОКОДАМИ (АДМИН) ----------
+# ---------- УПРАВЛЕНИЕ ПРОМОКОДАМИ ----------
 @router.message(F.text == "🎟 Промокоды")
 async def admin_promo_menu(message: Message):
     if not is_admin(message.from_user.id): return
@@ -1540,7 +1582,7 @@ async def admin_promo_cancel_code(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
 
-# ---------- ВЫДАЧА/СНЯТИЕ ПРЕМИУМА (АДМИН) ----------
+# ---------- ВЫДАЧА/СНЯТИЕ ПРЕМИУМА ----------
 @router.message(F.text == "🎁 Выдать премиум")
 async def admin_grant_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
@@ -1673,7 +1715,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Жанры, Избранное, Отзывы, Меню в 3 столбца)!")
+    logger.info("Бот запущен (Водяной знак на картинках)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
