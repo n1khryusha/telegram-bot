@@ -665,6 +665,12 @@ async def global_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Действие отменено.", reply_markup=main_menu_kb())
 
+# ---------- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК КНОПКИ ОТМЕНА ----------
+@router.message(F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
+async def global_cancel_button(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Действие отменено. Вы вернулись в главное меню.", reply_markup=main_menu_kb())
+
 # ---------- СТАРТ ----------
 @router.message(CommandStart())
 async def start_cmd(message: Message, command: CommandObject):
@@ -747,7 +753,7 @@ async def search_results(message: Message, state: FSMContext):
 
     await state.clear()
     total = len(rows)
-    await message.answer(f"🔍 Найдено <b>{total}</b> игр. Показываю первую:")
+    await message.answer(f"🔍 Найдено <b>{total}</b> игр. Показываю первую:", reply_markup=main_menu_kb())
     await send_product_card(message, rows, 0, 0, total)
 
 # ---------- ПРОФИЛЬ ----------
