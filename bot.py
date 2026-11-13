@@ -15,7 +15,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -446,6 +446,16 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
             return True
         except TelegramBadRequest:
             if product_id: db_query("UPDATE products SET tg_file_id = NULL WHERE id = ?", (product_id,))
+        except TelegramForbiddenError:
+            logger.info(f"[PHOTO] Пользователь {chat_id} заблокировал бота. Удаляем из базы.")
+            db_query("DELETE FROM users WHERE user_id = ?", (chat_id,))
+            db_query("DELETE FROM user_genres WHERE user_id = ?", (chat_id,))
+            db_query("DELETE FROM favorites WHERE user_id = ?", (chat_id,))
+            db_query("DELETE FROM link_clicks WHERE user_id = ?", (chat_id,))
+            return False
+        except Exception as e:
+            logger.warning(f"[PHOTO] Ошибка отправки {chat_id}: {e}")
+            return False
             
     if not image_url: return False
     
@@ -459,6 +469,13 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         if product_id and msg.photo:
             db_query("UPDATE products SET tg_file_id = ? WHERE id = ?", (msg.photo[-1].file_id, product_id))
         return True
+    except TelegramForbiddenError:
+        logger.info(f"[PHOTO] Пользователь {chat_id} заблокировал бота (при отправке файла). Удаляем из базы.")
+        db_query("DELETE FROM users WHERE user_id = ?", (chat_id,))
+        db_query("DELETE FROM user_genres WHERE user_id = ?", (chat_id,))
+        db_query("DELETE FROM favorites WHERE user_id = ?", (chat_id,))
+        db_query("DELETE FROM link_clicks WHERE user_id = ?", (chat_id,))
+        return False
     except Exception as e:
         logger.warning(f"[PHOTO] {e}")
         return False
@@ -569,11 +586,20 @@ async def fetch_steam_deals():
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
+    logger.info("[DAILY] Запуск рассылки «Скидка дня»...")
     users = [row[0] for row in db_query("SELECT user_id FROM users", fetch=True)]
-    if not users: return
+    if not users:
+        logger.warning("[DAILY] Нет пользователей в базе.")
+        return
+    logger.info(f"[DAILY] Пользователей: {len(users)}")
+    
     pool = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' LIMIT 500", fetch=True)
-    if not pool: return
-    sent, blocked = 0, 0
+    if not pool:
+        logger.warning("[DAILY] Нет игр в базе для рассылки.")
+        return
+    logger.info(f"[DAILY] Игр в пуле: {len(pool)}")
+    
+    sent, blocked, errors = 0, 0, 0
     for uid in users:
         pid, title, price, old_price, discount, url, image, description, price_usd = random.choice(pool)
         text = f"🎲 <b>Скидка дня: {html.escape(title)}</b>\n\n"
@@ -581,49 +607,58 @@ async def send_daily_deal(bot: Bot):
         if price: text += f"💵 Цена: <b>{price}</b>\n"
         if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
         if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)], [InlineKeyboardButton(text="🎲 Ещё случайная", callback_data="random_again")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Купить в Steam", url=url)],
+            [InlineKeyboardButton(text="🎲 Ещё случайная", callback_data="random_again")]
+        ])
         ok = await send_game_photo(bot, uid, pid, image, text, kb)
         if not ok:
             try:
                 await bot.send_message(chat_id=uid, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
                 sent += 1
             except TelegramBadRequest as e:
-                if "blocked" in str(e).lower() or "chat not found" in str(e).lower(): db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+                if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
+                    db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+                    db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
+                    db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
+                    db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
                 blocked += 1
-            except Exception: blocked += 1
-        else: sent += 1
+            except TelegramForbiddenError:
+                db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+                db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
+                db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
+                db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
+                blocked += 1
+            except Exception as e:
+                logger.error(f"[DAILY] Ошибка для {uid}: {e}")
+                errors += 1
+        else:
+            sent += 1
         await asyncio.sleep(0.07)
-    logger.info(f"[DAILY] Отправлено: {sent}, ошибок: {blocked}")
+    
+    logger.info(f"[DAILY] Отправлено: {sent}, заблокировали: {blocked}, ошибок: {errors}")
 
 # ---------- ЕЖЕДНЕВНАЯ СТАТИСТИКА В ЧАТ ОТЗЫВОВ ----------
 async def send_daily_stats(bot: Bot):
     logger.info("[STATS] Собираем ежедневную статистику...")
     
-    # 1. Общие данные
     total_users = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
     total_products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
     total_favorites = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
     
-    # 2. Новые пользователи за 24 часа
     yesterday = (utcnow() - timedelta(days=1)).isoformat()
     new_users = db_query("SELECT COUNT(*) FROM users WHERE joined_at > ?", (yesterday,), fetchone=True)[0]
     
-    # 3. Премиум
     premium_users = db_query("SELECT COUNT(*) FROM users WHERE premium_until > ?", (utcnow_iso(),), fetchone=True)[0]
     
-    # 4. Заработок за 24 часа (по платежам в Stars)
-    # В таблице payments статус confirmed ставится при успешной оплате
     revenue_row = db_query("SELECT SUM(amount) FROM payments WHERE status = 'confirmed' AND created_at > ?", (yesterday,), fetchone=True)
     revenue_24h = revenue_row[0] if revenue_row and revenue_row[0] else 0
     
-    # 5. Клики по ссылкам за 24 часа
     clicks_steam = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'steam%' AND clicked_at > ?", (yesterday,), fetchone=True)[0]
     clicks_mobile = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'mobile%' AND clicked_at > ?", (yesterday,), fetchone=True)[0]
     
-    # 6. Рефералы за 24 часа
     new_refs = db_query("SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL AND joined_at > ?", (yesterday,), fetchone=True)[0]
     
-    # 7. Популярные игры (Топ-3 по кликам)
     top_games = db_query("""
         SELECT title, clicks FROM products 
         WHERE clicks > 0 
@@ -699,6 +734,11 @@ async def notify_premium_super_deals(bot: Bot):
     for (uid,) in premium_users:
         try:
             await bot.send_message(chat_id=uid, text=digest_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except TelegramForbiddenError:
+            db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+            db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
+            db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
+            db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
         except Exception: pass
         await asyncio.sleep(0.05)
     
@@ -724,7 +764,7 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Рефералы")],
             [KeyboardButton(text="🎁 Выдать премиум"), KeyboardButton(text="🚫 Снять премиум")],
             [KeyboardButton(text="🎟 Промокоды"), KeyboardButton(text="📢 Рассылка")],
-            [KeyboardButton(text="⬅️ В меню")],
+            [KeyboardButton(text="🧪 Тест скидки дня"), KeyboardButton(text="⬅️ В меню")],
         ],
         resize_keyboard=True,
     )
@@ -1193,7 +1233,6 @@ async def successful_payment_handler(message: Message):
 
     add_premium_days(message.from_user.id, days)
 
-    # Записываем в таблицу платежей для статистики
     try:
         db_query("INSERT INTO payments (payment_id, user_id, amount, days, status) VALUES (?, ?, ?, ?, 'confirmed')",
                  (payment_info.telegram_payment_charge_id, message.from_user.id, payment_info.total_amount, days))
@@ -1664,6 +1703,12 @@ async def admin_refs(message: Message):
 
     await message.answer(text, reply_markup=admin_menu_kb())
 
+@admin_router.message(F.text == "🧪 Тест скидки дня")
+async def test_daily_deal(message: Message, bot: Bot):
+    await message.answer("⏳ Запускаю тестовую рассылку «Скидки дня»...")
+    await send_daily_deal(bot)
+    await message.answer("✅ Тест завершён. Проверь логи.", reply_markup=admin_menu_kb())
+
 # ---------- УПРАВЛЕНИЕ ПРОМОКОДАМИ ----------
 @admin_router.message(F.text == "🎟 Промокоды")
 async def admin_promo_menu(message: Message):
@@ -1918,6 +1963,12 @@ async def admin_broadcast_send(cb: CallbackQuery, state: FSMContext, bot: Bot):
         except TelegramBadRequest as e:
             if "blocked" in str(e).lower() or "chat not found" in str(e).lower(): db_query("DELETE FROM users WHERE user_id = ?", (uid,))
             blocked += 1
+        except TelegramForbiddenError:
+            db_query("DELETE FROM users WHERE user_id = ?", (uid,))
+            db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
+            db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
+            db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
+            blocked += 1
         except Exception: blocked += 1
         await asyncio.sleep(0.05)
     try: await cb.message.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent}\n🚫 Заблокировали/Ошибка: {blocked}")
@@ -1933,29 +1984,20 @@ async def main():
     dp.include_router(admin_router)
     dp.errors.register(errors_handler)
 
-    # Настраиваем часовой пояс для МСК (UTC+3)
     timezone_msk = timezone(timedelta(hours=3))
-    
     scheduler = AsyncIOScheduler(timezone=timezone_msk)
     
-    # 1. Парсинг раз в сутки (каждый день в 00:00 по МСК)
     scheduler.add_job(fetch_steam_deals, "cron", hour=0, minute=0, max_instances=1)
-    
-    # 2. Ежедневная статистика в 12:00 по МСК
     scheduler.add_job(send_daily_stats, "cron", hour=12, minute=0, args=[bot], max_instances=1)
-    
-    # 3. Ежедневная скидка (в 12:05 и 19:00 по МСК)
     scheduler.add_job(send_daily_deal, "cron", hour=12, minute=5, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
-    
-    # 4. Супер-скидки и избранное
     scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
     scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1)
     
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Автопарсинг в 00:00, Статистика в 12:00 по МСК)!")
+    logger.info("Бот запущен (Обработка блокировок + Удаление из базы)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
