@@ -220,7 +220,7 @@ def db_init():
     CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until);
     """)
     
-    # ============ МИГРАЦИИ (исправления для старых баз) ============
+    # Миграции
     cur.execute("PRAGMA table_info(users)")
     cols = {row[1] for row in cur.fetchall()}
     if "referred_by" not in cols:
@@ -239,20 +239,17 @@ def db_init():
     if "last_updated" not in cols:
         cur.execute("ALTER TABLE products ADD COLUMN last_updated TEXT")
     
-    # КРИТИЧНО: Проверяем, есть ли UNIQUE индекс на title
-    # Если старая база создавалась без UNIQUE — ON CONFLICT упадёт.
     try:
         cur.execute("PRAGMA index_list(products)")
         indexes = cur.fetchall()
         has_unique_title = False
         for idx in indexes:
-            if idx[2] == 1:  # 1 = unique
+            if idx[2] == 1:
                 cur.execute(f"PRAGMA index_info({idx[1]})")
                 idx_cols = [c[2] for c in cur.fetchall()]
                 if "title" in idx_cols:
                     has_unique_title = True
                     break
-        
         if not has_unique_title:
             logger.info("[DB] Создаю уникальный индекс на title...")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_title ON products(title)")
@@ -295,9 +292,6 @@ def safe_html_truncate(text: str, limit: int = 200) -> str:
 
 def escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-def normalize_title(s: str) -> str:
-    return re.sub(r"\s+", " ", s.strip())
 
 def check_premium(user_id: int) -> bool:
     res = db_query("SELECT premium_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
@@ -389,7 +383,6 @@ async def download_image(url: str) -> bytes | None:
         return None
 
 def apply_watermark(image_bytes: bytes) -> bytes:
-    """Накладывает логотип в левый верхний угол, а текст — в левый нижний."""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = img.size
@@ -397,7 +390,6 @@ def apply_watermark(image_bytes: bytes) -> bytes:
         watermark = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(watermark)
         
-        # --- 1. ЛОГОТИП (Левый верхний угол) ---
         logo_x, logo_y = 15, 15
         logo = get_logo()
         if logo:
@@ -413,14 +405,12 @@ def apply_watermark(image_bytes: bytes) -> bytes:
             except Exception as e:
                 logger.warning(f"[Watermark] Ошибка загрузки логотипа: {e}")
 
-        # --- 2. ТЕКСТ С ОБВОДКОЙ (Левый нижний угол) ---
         try:
             font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18) 
         except IOError:
             font = ImageFont.load_default()
             
         text = "BeaconKeys"
-        
         bbox = draw.textbbox((0, 0), text, font=font)
         text_height = bbox[3] - bbox[1]
         
@@ -435,7 +425,6 @@ def apply_watermark(image_bytes: bytes) -> bytes:
         
         draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
         
-        # --- 3. ОБЪЕДИНЯЕМ ---
         out = Image.alpha_composite(img, watermark)
         
         output = io.BytesIO()
@@ -516,6 +505,7 @@ def _format_price(price_overview) -> tuple[str, str, str]:
     return final_str, original_str, discount_str
 
 async def fetch_steam_deals():
+    logger.info("[PARSER] Начинаем парсинг Steam...")
     url = "https://store.steampowered.com/api/featuredcategories?cc=ru&l=russian"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -556,7 +546,6 @@ async def fetch_steam_deals():
             price_usd = det["price_overview"].get("final_formatted", "") if det["price_overview"] else ""
             now_str = utcnow_iso()
 
-            # Оборачиваем в try/except, чтобы одна битая игра не сломала весь парсинг
             try:
                 db_query("""
                     INSERT INTO products (title, price, old_price, discount, url, image, description, price_usd, genres, last_updated)
@@ -606,6 +595,77 @@ async def send_daily_deal(bot: Bot):
         await asyncio.sleep(0.07)
     logger.info(f"[DAILY] Отправлено: {sent}, ошибок: {blocked}")
 
+# ---------- ЕЖЕДНЕВНАЯ СТАТИСТИКА В ЧАТ ОТЗЫВОВ ----------
+async def send_daily_stats(bot: Bot):
+    logger.info("[STATS] Собираем ежедневную статистику...")
+    
+    # 1. Общие данные
+    total_users = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
+    total_products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
+    total_favorites = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
+    
+    # 2. Новые пользователи за 24 часа
+    yesterday = (utcnow() - timedelta(days=1)).isoformat()
+    new_users = db_query("SELECT COUNT(*) FROM users WHERE joined_at > ?", (yesterday,), fetchone=True)[0]
+    
+    # 3. Премиум
+    premium_users = db_query("SELECT COUNT(*) FROM users WHERE premium_until > ?", (utcnow_iso(),), fetchone=True)[0]
+    
+    # 4. Заработок за 24 часа (по платежам в Stars)
+    # В таблице payments статус confirmed ставится при успешной оплате
+    revenue_row = db_query("SELECT SUM(amount) FROM payments WHERE status = 'confirmed' AND created_at > ?", (yesterday,), fetchone=True)
+    revenue_24h = revenue_row[0] if revenue_row and revenue_row[0] else 0
+    
+    # 5. Клики по ссылкам за 24 часа
+    clicks_steam = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'steam%' AND clicked_at > ?", (yesterday,), fetchone=True)[0]
+    clicks_mobile = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'mobile%' AND clicked_at > ?", (yesterday,), fetchone=True)[0]
+    
+    # 6. Рефералы за 24 часа
+    new_refs = db_query("SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL AND joined_at > ?", (yesterday,), fetchone=True)[0]
+    
+    # 7. Популярные игры (Топ-3 по кликам)
+    top_games = db_query("""
+        SELECT title, clicks FROM products 
+        WHERE clicks > 0 
+        ORDER BY clicks DESC LIMIT 3
+    """, fetch=True)
+    top_games_text = ""
+    for t, c in top_games:
+        top_games_text += f"  • {html.escape(t[:30])} — {c} кликов\n"
+    if not top_games_text:
+        top_games_text = "  • Пока нет данных\n"
+
+    text = (
+        f"📊 <b>ЕЖЕДНЕВНАЯ СТАТИСТИКА БОТА</b>\n"
+        f"📅 {utcnow().strftime('%d.%m.%Y')}\n\n"
+        
+        f"👥 <b>Пользователи:</b>\n"
+        f"  • Всего: <b>{total_users}</b>\n"
+        f"  • Новых за 24ч: <b>+{new_users}</b>\n"
+        f"  • Премиум: <b>{premium_users}</b>\n"
+        f"  • Пришло по рефке: <b>{new_refs}</b>\n\n"
+        
+        f"💰 <b>Финансы:</b>\n"
+        f"  • Заработано за 24ч: <b>{revenue_24h} ⭐</b>\n\n"
+        
+        f"📈 <b>Активность (за 24ч):</b>\n"
+        f"  • Кликов Steam: <b>{clicks_steam}</b>\n"
+        f"  • Кликов Mobile: <b>{clicks_mobile}</b>\n"
+        f"  • В избранном: <b>{total_favorites}</b> игр\n"
+        f"  • В базе: <b>{total_products}</b> игр\n\n"
+        
+        f"🔥 <b>Топ-3 игры по кликам:</b>\n"
+        f"{top_games_text}\n"
+        
+        f"<i>Отчет сформирован автоматически.</i>"
+    )
+
+    try:
+        await bot.send_message(chat_id=REVIEW_CHAT_ID, text=text, parse_mode=ParseMode.HTML)
+        logger.info("[STATS] Ежедневный отчет отправлен.")
+    except Exception as e:
+        logger.error(f"[STATS] Ошибка отправки отчета: {e}")
+
 # ---------- УВЕДОМЛЕНИЯ ИЗБРАННОГО ----------
 async def notify_favorites_matches(bot: Bot):
     rows = db_query("SELECT f.user_id, p.id, p.title, p.price, p.discount, p.url, p.image, p.description FROM favorites f JOIN products p ON p.id = f.product_id JOIN users u ON u.user_id = f.user_id WHERE u.premium_until > ? AND p.discount IS NOT NULL AND p.discount != '' AND NOT EXISTS (SELECT 1 FROM notified_favorites nf WHERE nf.user_id = f.user_id AND nf.product_id = p.id) LIMIT 50", (utcnow_iso(),), fetch=True)
@@ -626,7 +686,6 @@ async def notify_premium_super_deals(bot: Bot):
     if not super_deals: return
     premium_users = db_query("SELECT user_id FROM users WHERE premium_until > ?", (utcnow_iso(),), fetch=True)
     
-    # Формируем один дайджест
     digest_text = "🔥 <b>СУПЕР-СКИДКИ ДНЯ (80%+)</b>\n\n"
     for i, (pid, title, price, discount, url, image, description) in enumerate(super_deals, 1):
         digest_text += f"{i}. {html.escape(title)} — <b>{price}</b> ({discount})\n"
@@ -643,7 +702,6 @@ async def notify_premium_super_deals(bot: Bot):
         except Exception: pass
         await asyncio.sleep(0.05)
     
-    # Отмечаем как отправленные
     for pid, *_ in super_deals:
         db_query("INSERT OR IGNORE INTO notified_deals (product_id, notified_at) VALUES (?, ?)", (pid, utcnow_iso()))
 
@@ -711,22 +769,17 @@ class ReviewFSM(StatesGroup):
 class SearchFSM(StatesGroup):
     waiting_query = State()
 
-# ---------- ERROR HANDLER (ИСПРАВЛЕН) ----------
+# ---------- ERROR HANDLER ----------
 async def errors_handler(event, exception: Exception = None, bot: Bot = None):
-    # В новых версиях aiogram exception может приходить в event, а не в аргументе
     if exception is None and hasattr(event, 'exception'):
         exception = event.exception
-    
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
-    
-    # Пытаемся отправить сообщение пользователю
     try:
         if hasattr(event, 'message') and event.message:
             await event.message.answer("⚠️ Что-то пошло не так. Попробуйте еще раз или напишите в поддержку.")
         elif hasattr(event, 'callback_query') and event.callback_query:
             await event.callback_query.answer("⚠️ Ошибка. Попробуйте еще раз.", show_alert=True)
-    except Exception: 
-        pass
+    except Exception: pass
     return True
 
 # ---------- ГЛОБАЛЬНЫЙ /CANCEL ----------
@@ -1124,7 +1177,6 @@ async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
 async def successful_payment_handler(message: Message):
     payment_info: SuccessfulPayment = message.successful_payment
     
-    # Валидация платежа
     if payment_info.currency != "XTR":
         logger.warning(f"[PAYMENT] Неверная валюта: {payment_info.currency}")
         return
@@ -1140,6 +1192,13 @@ async def successful_payment_handler(message: Message):
         return
 
     add_premium_days(message.from_user.id, days)
+
+    # Записываем в таблицу платежей для статистики
+    try:
+        db_query("INSERT INTO payments (payment_id, user_id, amount, days, status) VALUES (?, ?, ?, ?, 'confirmed')",
+                 (payment_info.telegram_payment_charge_id, message.from_user.id, payment_info.total_amount, days))
+    except Exception as e:
+        logger.warning(f"[PAYMENT] Ошибка записи в БД: {e}")
 
     await message.answer(
         f"✅ <b>Оплата прошла успешно!</b>\n\n"
@@ -1267,13 +1326,11 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     if not isinstance(message_or_callback, CallbackQuery):
-        # Новая карточка (из поиска)
         ok = await send_game_photo(message_or_callback.bot, message_or_callback.chat.id, pid, image, text, kb)
         if not ok:
             await message_or_callback.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return
     
-    # Редактирование существующей карточки
     cb = message_or_callback
     try: await cb.answer()
     except Exception: pass
@@ -1299,7 +1356,6 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower(): return
     
-    # Фолбэк: удаляем старое и отправляем новое
     ok = await send_game_photo(cb.bot, msg.chat.id, pid, image, text, kb)
     if not ok:
         try: await cb.bot.send_message(chat_id=msg.chat.id, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -1877,16 +1933,29 @@ async def main():
     dp.include_router(admin_router)
     dp.errors.register(errors_handler)
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(fetch_steam_deals, "interval", hours=12, max_instances=1)
-    scheduler.add_job(send_daily_deal, "cron", hour=12, minute=0, args=[bot], max_instances=1)
+    # Настраиваем часовой пояс для МСК (UTC+3)
+    timezone_msk = timezone(timedelta(hours=3))
+    
+    scheduler = AsyncIOScheduler(timezone=timezone_msk)
+    
+    # 1. Парсинг раз в сутки (каждый день в 00:00 по МСК)
+    scheduler.add_job(fetch_steam_deals, "cron", hour=0, minute=0, max_instances=1)
+    
+    # 2. Ежедневная статистика в 12:00 по МСК
+    scheduler.add_job(send_daily_stats, "cron", hour=12, minute=0, args=[bot], max_instances=1)
+    
+    # 3. Ежедневная скидка (в 12:05 и 19:00 по МСК)
+    scheduler.add_job(send_daily_deal, "cron", hour=12, minute=5, args=[bot], max_instances=1)
     scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
+    
+    # 4. Супер-скидки и избранное
     scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
     scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1)
+    
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Все критичные баги исправлены)!")
+    logger.info("Бот запущен (Автопарсинг в 00:00, Статистика в 12:00 по МСК)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
