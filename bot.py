@@ -6,6 +6,7 @@ import random
 import re
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -76,11 +77,15 @@ admin_router = Router()
 admin_router.message.filter(F.from_user.id.in_(ADMIN_IDS))
 admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 
-PAGE_LIMIT = 50
-FAVORITES_LIMIT_FREE = 3
-FAVORITES_LIMIT_PREMIUM = 20
+PAGE_LIMIT = 10
+FAVORITES_LIMIT_FREE = 5
+FAVORITES_LIMIT_PREMIUM = 30
 GENRES_LIMIT_FREE = 3
 GENRES_LIMIT_PREMIUM = 10
+
+# Anti-spam: словарь {user_id: last_time}
+SEARCH_COOLDOWN = {}
+SEARCH_COOLDOWN_SEC = 5
 
 AVAILABLE_GENRES = [
     "Action", "Adventure", "RPG", "Strategy", "Simulation", 
@@ -161,6 +166,8 @@ def db_init():
         last_roulette TEXT,
         last_random_again TEXT,
         last_review_date TEXT,
+        last_daily_bonus TEXT,
+        daily_bonus_streak INTEGER DEFAULT 0,
         referred_by INTEGER,
         ref_bonus_claimed INTEGER DEFAULT 0
     );
@@ -229,6 +236,10 @@ def db_init():
         cur.execute("ALTER TABLE users ADD COLUMN ref_bonus_claimed INTEGER DEFAULT 0")
     if "last_review_date" not in cols:
         cur.execute("ALTER TABLE users ADD COLUMN last_review_date TEXT")
+    if "last_daily_bonus" not in cols:
+        cur.execute("ALTER TABLE users ADD COLUMN last_daily_bonus TEXT")
+    if "daily_bonus_streak" not in cols:
+        cur.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
 
     cur.execute("PRAGMA table_info(products)")
     cols = {row[1] for row in cur.fetchall()}
@@ -286,9 +297,7 @@ def safe_html_truncate(text: str, limit: int = 200) -> str:
     text = html.escape(text, quote=False)
     if len(text) <= limit:
         return text
-    text = text[:limit]
-    text = re.sub(r"<[^>]*$", "", text)
-    return text
+    return text[:limit] + "..."
 
 def escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -646,9 +655,7 @@ async def send_daily_stats(bot: Bot):
     total_products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
     total_favorites = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
     
-    # Берем время 24 часа назад БЕЗ таймзоны, чтобы совпадало с SQLite CURRENT_TIMESTAMP
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None).isoformat()
-    
     new_users = db_query("SELECT COUNT(*) FROM users WHERE joined_at > ?", (yesterday,), fetchone=True)[0]
     
     premium_users = db_query("SELECT COUNT(*) FROM users WHERE premium_until > ?", (utcnow_iso(),), fetchone=True)[0]
@@ -703,12 +710,45 @@ async def send_daily_stats(bot: Bot):
     except Exception as e:
         logger.error(f"[STATS] Ошибка отправки отчета: {e}")
 
-# ---------- УВЕДОМЛЕНИЯ ИЗБРАННОГО ----------
+# ---------- УВЕДОМЛЕНИЯ ИЗБРАННОГО (ДЛЯ ВСЕХ) ----------
 async def notify_favorites_matches(bot: Bot):
-    rows = db_query("SELECT f.user_id, p.id, p.title, p.price, p.discount, p.url, p.image, p.description FROM favorites f JOIN products p ON p.id = f.product_id JOIN users u ON u.user_id = f.user_id WHERE u.premium_until > ? AND p.discount IS NOT NULL AND p.discount != '' AND NOT EXISTS (SELECT 1 FROM notified_favorites nf WHERE nf.user_id = f.user_id AND nf.product_id = p.id) LIMIT 50", (utcnow_iso(),), fetch=True)
+    # Премиум — получают уведомления всегда
+    # Обычные — не чаще 1 раза в неделю (по факту просто реже проверяем)
+    
+    # 1. Сначала обрабатываем всех, у кого есть избранное
+    rows = db_query("""
+        SELECT f.user_id, p.id, p.title, p.price, p.discount, p.url, p.image, p.description, u.premium_until, u.last_daily_bonus
+        FROM favorites f 
+        JOIN products p ON p.id = f.product_id 
+        JOIN users u ON u.user_id = f.user_id 
+        WHERE p.discount IS NOT NULL AND p.discount != '' 
+        AND NOT EXISTS (SELECT 1 FROM notified_favorites nf WHERE nf.user_id = f.user_id AND nf.product_id = p.id)
+        LIMIT 50
+    """, fetch=True)
+    
     if not rows: return
-    for uid, pid, title, price, discount, url, image, desc in rows:
+    
+    for uid, pid, title, price, discount, url, image, desc, prem_until, last_bonus in rows:
+        # Проверяем, премиум ли пользователь
+        is_prem = False
+        if prem_until:
+            dt = parse_dt(prem_until)
+            if dt and dt > utcnow():
+                is_prem = True
+        
+        # Если НЕ премиум — отправляем уведомление только раз в 7 дней (по last_daily_bonus как маркеру)
+        if not is_prem:
+            if last_bonus:
+                last_dt = parse_dt(last_bonus)
+                if last_dt and (utcnow() - last_dt).days < 7:
+                    continue
+            # Обновляем маркер, чтобы 7 дней не спамить
+            db_query("UPDATE users SET last_daily_bonus = ? WHERE user_id = ?", (utcnow_iso(), uid))
+        
         text = f"⭐ <b>Игра из Избранного в скидке!</b>\n\n🎮 {html.escape(title)}\n💵 {price}\n🔥 {discount}\n\n📝 <i>{safe_html_truncate(desc or '', 100)}...</i>"
+        if not is_prem:
+            text += "\n\n💎 <i>Бесплатные пользователи получают уведомления раз в неделю. Купи Премиум для мгновенных алертов!</i>"
+        
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)]])
         ok = await send_game_photo(bot, uid, pid, image, text, kb)
         if not ok:
@@ -753,8 +793,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра"), KeyboardButton(text="💳 Пополнить Steam")],
             [KeyboardButton(text="📱 Мобильные игры"), KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🎟 Промокод"), KeyboardButton(text="⭐ Оставить отзыв"), KeyboardButton(text="📢 Реклама")],
-            [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="❤️ Поддержать"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="⭐ Оставить отзыв"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
     )
@@ -812,7 +851,7 @@ class SearchFSM(StatesGroup):
     waiting_query = State()
 
 # ---------- ERROR HANDLER ----------
-async def errors_handler(event, exception: Exception = None, bot: Bot = None):
+async def errors_handler(event, exception: Exception = None):
     if exception is None and hasattr(event, 'exception'):
         exception = event.exception
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
@@ -829,6 +868,28 @@ async def errors_handler(event, exception: Exception = None, bot: Bot = None):
 async def global_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Действие отменено.", reply_markup=main_menu_kb())
+
+# ---------- /HELP ----------
+@router.message(Command("help"))
+async def help_cmd(message: Message):
+    await message.answer(
+        "🆘 <b>Помощь по боту BeaconKeys</b>\n\n"
+        "🔥 <b>Скидки</b> — посмотреть актуальные скидки в Steam\n"
+        "🎲 <b>Случайная игра</b> — рулетка (1 раз в день, Премиум — безлимит)\n"
+        "🔍 <b>Поиск</b> — найти игру по названию\n"
+        "💳 <b>Пополнить Steam</b> — пополнение кошелька\n"
+        "📱 <b>Мобильные игры</b> — донат в Genshin, Brawl Stars и др.\n"
+        "💎 <b>Премиум</b> — подписка с расширенными лимитами\n"
+        "👤 <b>Профиль</b> — статистика, избранное, рефералы\n"
+        "⭐ <b>Оставить отзыв</b> — оценка бота (1 раз в 7 дней)\n\n"
+        "🎁 <b>Ежедневный бонус</b> — в профиле (7 дней подряд = 1 день Премиума)\n\n"
+        "Команды:\n"
+        "/start — главное меню\n"
+        "/help — эта справка\n"
+        "/cancel — отмена действия\n"
+        "/admin — только для админов",
+        reply_markup=main_menu_kb()
+    )
 
 # ---------- СТАРТ ----------
 @router.message(CommandStart())
@@ -891,9 +952,17 @@ async def start_cmd(message: Message, command: CommandObject):
         reply_markup=main_menu_kb(),
     )
 
-# ---------- ПОИСК ----------
+# ---------- ПОИСК (С RATE LIMIT) ----------
 @router.message(F.text == "🔍 Поиск")
 async def search_start(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    now = time.time()
+    last_time = SEARCH_COOLDOWN.get(uid, 0)
+    if now - last_time < SEARCH_COOLDOWN_SEC:
+        await message.answer(f"⏳ Подожди {int(SEARCH_COOLDOWN_SEC - (now - last_time))} сек перед новым поиском.")
+        return
+    SEARCH_COOLDOWN[uid] = now
+    
     await state.set_state(SearchFSM.waiting_query)
     await message.answer("🔍 <b>Поиск игр</b>\n\nВведите название игры, которую хотите найти:\n\n<i>Напишите «отмена», чтобы выйти.</i>",
                          reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
@@ -941,6 +1010,9 @@ async def profile_menu(message: Message):
         (uid,), fetch=True
     )
     ref_count = len(refs)
+    
+    # Реферальная статистика (п. 31)
+    ref_bonus_days = ref_count * REF_BONUS_DAYS
 
     text = f"👤 <b>Твой профиль</b>\n\n🆔 ID: <code>{uid}</code>\n"
     if joined and joined[0]: text += f"📅 С нами с: {joined[0][:10]}\n"
@@ -953,6 +1025,7 @@ async def profile_menu(message: Message):
     text += f"\n⭐ <b>Избранное:</b> {f_count} / {f_limit} игр\n"
     text += f"🎮 <b>Твои жанры:</b> {g_text} ({len(genres)}/{g_limit})\n"
     text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
+    text += f"👑 <b>Получено с рефералов:</b> {ref_bonus_days} дн. Премиума\n"
 
     if refs:
         text += "<b>Твои рефералы:</b>\n"
@@ -963,6 +1036,7 @@ async def profile_menu(message: Message):
             text += "... (показаны последние 20)\n"
 
     buttons = [
+        [InlineKeyboardButton(text="🎁 Ежедневный бонус", callback_data="daily_bonus")],
         [InlineKeyboardButton(text="🎁 Пригласить друга (+3 дня)", callback_data="show_ref_link")],
         [InlineKeyboardButton(text="⭐ Мое Избранное", callback_data="fav_show")],
         [InlineKeyboardButton(text="🎮 Выбрать жанры для рулетки", callback_data="genres_show")],
@@ -970,6 +1044,43 @@ async def profile_menu(message: Message):
     ]
     
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+# ---------- ЕЖЕДНЕВНЫЙ БОНУС ----------
+@router.callback_query(F.data == "daily_bonus")
+async def daily_bonus(cb: CallbackQuery):
+    uid = cb.from_user.id
+    now = utcnow()
+    today = now.date().isoformat()
+    
+    res = db_query("SELECT last_daily_bonus, daily_bonus_streak FROM users WHERE user_id = ?", (uid,), fetchone=True)
+    last_bonus_str, streak = res if res else (None, 0)
+    
+    if last_bonus_str:
+        last_dt = parse_dt(last_bonus_str)
+        if last_dt and last_dt.date().isoformat() == today:
+            await cb.answer("✅ Ты уже получал бонус сегодня! Возвращайся завтра.", show_alert=True)
+            return
+        
+        # Если заходил вчера — стрик растет, если пропустил — сбрасывается
+        if last_dt and (now - last_dt).days == 1:
+            streak += 1
+        else:
+            streak = 1
+    else:
+        streak = 1
+    
+    # Обновляем
+    db_query("UPDATE users SET last_daily_bonus = ?, daily_bonus_streak = ? WHERE user_id = ?", (now.isoformat(), streak, uid))
+    
+    # Награда
+    if streak >= 7:
+        add_premium_days(uid, 1)
+        db_query("UPDATE users SET daily_bonus_streak = 0 WHERE user_id = ?", (uid,))
+        await cb.answer("🎉 Ты заходил 7 дней подряд! +1 день Премиума!", show_alert=True)
+        await cb.message.answer(f"🎉 <b>Ежедневный бонус!</b>\n\nТы заходил <b>7 дней подряд</b> и получаешь <b>+1 день Премиума</b>! 👑")
+    else:
+        await cb.answer(f"✅ Бонус получен! Стрик: {streak}/7", show_alert=True)
+        await cb.message.answer(f"🎁 <b>Ежедневный бонус получен!</b>\n\nТвой стрик: <b>{streak} / 7</b>\nЗаходи завтра, чтобы продолжить!")
 
 # ---------- ВЫБОР ЖАНРОВ ----------
 @router.callback_query(F.data == "genres_show")
@@ -1145,7 +1256,7 @@ async def premium_menu(message: Message, user_id: int | None = None):
         "   <i>Крути сколько хочешь и находи лучшие скидки первым.</i>\n\n"
         "🏆 <b>Только топовые скидки</b>\n"
         "   <i>Рулетка выдает игры с максимальным процентом скидки.</i>\n\n"
-        "⭐ <b>Избранное до 20 игр</b>\n"
+        "⭐ <b>Избранное до 30 игр</b>\n"
         "   <i>Добавляй больше игр в список желаемого.</i>\n\n"
         "🎮 <b>До 10 жанров в рулетке</b>\n"
         "   <i>Настраивай рулетку под себя.</i>\n\n"
@@ -1327,15 +1438,38 @@ async def user_promo_check(message: Message, state: FSMContext):
         reply_markup=main_menu_kb()
     )
 
-# ---------- СКИДКИ ----------
+# ---------- СКИДКИ (С ФИЛЬТРАМИ) ----------
 @router.message(F.text == "🔥 Скидки")
 async def discounts_menu(message: Message):
-    products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 90%+", callback_data="filter_90"),
+         InlineKeyboardButton(text="💸 До 100₽", callback_data="filter_cheap")],
+        [InlineKeyboardButton(text="🆕 Новинки", callback_data="filter_new")],
+        [InlineKeyboardButton(text="📜 Все скидки", callback_data="filter_all")],
+    ])
+    await message.answer("🔥 <b>Скидки в Steam</b>\n\nВыбери фильтр:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("filter_"))
+async def filter_products(cb: CallbackQuery):
+    filter_type = cb.data.split("_", 1)[1]
+    
+    if filter_type == "90":
+        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE CAST(REPLACE(discount, '-', '') AS INTEGER) >= 90 AND image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    elif filter_type == "cheap":
+        # Простой фильтр по цене (ищем «до 100 ₽» по строке)
+        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE price LIKE '%₽' AND CAST(REPLACE(price, ' ₽', '') AS INTEGER) <= 100 AND image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    elif filter_type == "new":
+        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY created_at DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    else:  # all
+        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    
     if not products:
-        await message.answer("Скидок пока нет. Админ скоро их добавит! 🙂")
+        await cb.answer("😔 По этому фильтру ничего не найдено.", show_alert=True)
         return
-    total = db_query("SELECT COUNT(*) FROM products WHERE image IS NOT NULL AND image != ''", fetchone=True)[0]
-    await send_product_card(message, products, 0, 0, total)
+    
+    total = len(products)
+    await cb.answer(f"Найдено: {total}")
+    await send_product_card(cb, products, 0, 0, total)
 
 async def send_product_card(message_or_callback, products, index: int, offset: int, total: int):
     pid, title, price, old_price, discount, url, image, description, price_usd = products[index]
@@ -1358,6 +1492,9 @@ async def send_product_card(message_or_callback, products, index: int, offset: i
     buttons = []
     if nav_row: buttons.append(nav_row)
     buttons.append([InlineKeyboardButton(text="🛒 Купить в Steam", url=url)])
+    # Кнопка поделиться (п. 28)
+    share_url = f"https://t.me/share/url?url={url}&text={html.escape(title)}"
+    buttons.append([InlineKeyboardButton(text="📤 Поделиться", url=share_url)])
     
     if is_fav:
         buttons.append([InlineKeyboardButton(text="✅ В Избранном", callback_data="fav_already")])
@@ -1424,7 +1561,7 @@ async def fav_add(cb: CallbackQuery):
     limit = favorites_limit(uid)
     count = favorites_count(uid)
     if count >= limit:
-        await cb.answer(f"Лимит Избранного: {limit} игр.\nКупи Премиум, чтобы добавить до 20!", show_alert=True)
+        await cb.answer(f"Лимит Избранного: {limit} игр.\nКупи Премиум, чтобы добавить до 30!", show_alert=True)
         return
     
     db_query("INSERT OR IGNORE INTO favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
@@ -1453,7 +1590,7 @@ async def fav_show(cb: CallbackQuery):
         text += f"• {html.escape(title)}\n"
         buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {title[:25]}", callback_data=f"fav_del_{pid}")])
     if not check_premium(uid):
-        text += "\n💎 Хочешь до 20 игр + уведомления о скидках? Купи Премиум!"
+        text += "\n💎 Хочешь до 30 игр + уведомления о скидках? Купи Премиум!"
         buttons.append([InlineKeyboardButton(text="💎 Премиум", callback_data="premium_show")])
     try: await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except TelegramBadRequest: await cb.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -1517,7 +1654,12 @@ async def random_game(message: Message):
     if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
     if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
     if is_prem: text += "\n👑 <i>Бонус Премиум: максимальная скидка!</i>"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]])
+    
+    buttons = [[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]]
+    share_url = f"https://t.me/share/url?url={url}&text={html.escape(title)}"
+    buttons.append([InlineKeyboardButton(text="📤 Поделиться", url=share_url)])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
     ok = await send_game_photo(message.bot, message.chat.id, pid, image, text, kb)
     if not ok: await message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
@@ -1543,7 +1685,12 @@ async def random_again(cb: CallbackQuery):
     if price: text += f"💵 Цена: <b>{price}</b>\n"
     if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
     if description: text += f"\n📝 <i>{safe_html_truncate(description, 150)}...</i>\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]])
+    
+    buttons = [[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]]
+    share_url = f"https://t.me/share/url?url={url}&text={html.escape(title)}"
+    buttons.append([InlineKeyboardButton(text="📤 Поделиться", url=share_url)])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
     ok = await send_game_photo(cb.bot, cb.message.chat.id, pid, image, text, kb)
     if not ok: await cb.message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
@@ -1648,7 +1795,7 @@ async def global_cancel_button(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Действие отменено. Вы вернулись в главное меню.", reply_markup=main_menu_kb())
 
-# ---------- АДМИНКА (ТОЛЬКО ДЛЯ АДМИНОВ) ----------
+# ---------- АДМИНКА ----------
 @admin_router.message(Command("admin"))
 async def admin_cmd(message: Message):
     await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu_kb())
@@ -1999,7 +2146,7 @@ async def main():
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Обработка блокировок + Удаление из базы)!")
+    logger.info("Бот запущен (Фильтры, Ежедневный бонус, /help, Rate limit)!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
