@@ -646,7 +646,9 @@ async def send_daily_stats(bot: Bot):
     total_products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
     total_favorites = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
     
-    yesterday = (utcnow() - timedelta(days=1)).isoformat()
+    # Берем время 24 часа назад БЕЗ таймзоны, чтобы совпадало с SQLite CURRENT_TIMESTAMP
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None).isoformat()
+    
     new_users = db_query("SELECT COUNT(*) FROM users WHERE joined_at > ?", (yesterday,), fetchone=True)[0]
     
     premium_users = db_query("SELECT COUNT(*) FROM users WHERE premium_until > ?", (utcnow_iso(),), fetchone=True)[0]
@@ -672,7 +674,7 @@ async def send_daily_stats(bot: Bot):
 
     text = (
         f"📊 <b>ЕЖЕДНЕВНАЯ СТАТИСТИКА БОТА</b>\n"
-        f"📅 {utcnow().strftime('%d.%m.%Y')}\n\n"
+        f"📅 {datetime.now(timezone.utc).strftime('%d.%m.%Y')}\n\n"
         
         f"👥 <b>Пользователи:</b>\n"
         f"  • Всего: <b>{total_users}</b>\n"
