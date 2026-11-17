@@ -45,6 +45,12 @@ PLATI_AGENT_ID = os.getenv("PLATI_AGENT_ID", "1480092")
 PLATI_SUPPORT = os.getenv("PLATI_SUPPORT", "@ObuzaMeduza")
 STEAM_TOPUP_ITEM_ID = os.getenv("STEAM_TOPUP_ITEM_ID", "3961593")
 
+# --- FAZERCARDS API ---
+FAZER_API_KEY = os.getenv("FAZER_API_KEY", "")
+FAZER_API_BASE = "https://api.fzr.cards/api/v2"
+FAZER_MARKUP_PERCENT = 15  # Наценка в % (15% сверху)
+STARS_TO_RUB = 1.5         # 1 звезда = 1.5 рубля (для конвертации)
+
 REF_BONUS_DAYS = 3
 CONTACT_TG = "@ObuzaMeduza"
 CONTACT_EMAIL = "nikhrushawork@gmail.com"
@@ -83,7 +89,6 @@ FAVORITES_LIMIT_PREMIUM = 30
 GENRES_LIMIT_FREE = 3
 GENRES_LIMIT_PREMIUM = 10
 
-# Anti-spam: словарь {user_id: last_time}
 SEARCH_COOLDOWN = {}
 SEARCH_COOLDOWN_SEC = 5
 
@@ -230,25 +235,17 @@ def db_init():
     # Миграции
     cur.execute("PRAGMA table_info(users)")
     cols = {row[1] for row in cur.fetchall()}
-    if "referred_by" not in cols:
-        cur.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
-    if "ref_bonus_claimed" not in cols:
-        cur.execute("ALTER TABLE users ADD COLUMN ref_bonus_claimed INTEGER DEFAULT 0")
-    if "last_review_date" not in cols:
-        cur.execute("ALTER TABLE users ADD COLUMN last_review_date TEXT")
-    if "last_daily_bonus" not in cols:
-        cur.execute("ALTER TABLE users ADD COLUMN last_daily_bonus TEXT")
-    if "daily_bonus_streak" not in cols:
-        cur.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
+    if "referred_by" not in cols: cur.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+    if "ref_bonus_claimed" not in cols: cur.execute("ALTER TABLE users ADD COLUMN ref_bonus_claimed INTEGER DEFAULT 0")
+    if "last_review_date" not in cols: cur.execute("ALTER TABLE users ADD COLUMN last_review_date TEXT")
+    if "last_daily_bonus" not in cols: cur.execute("ALTER TABLE users ADD COLUMN last_daily_bonus TEXT")
+    if "daily_bonus_streak" not in cols: cur.execute("ALTER TABLE users ADD COLUMN daily_bonus_streak INTEGER DEFAULT 0")
 
     cur.execute("PRAGMA table_info(products)")
     cols = {row[1] for row in cur.fetchall()}
-    if "tg_file_id" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN tg_file_id TEXT")
-    if "genres" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN genres TEXT")
-    if "last_updated" not in cols:
-        cur.execute("ALTER TABLE products ADD COLUMN last_updated TEXT")
+    if "tg_file_id" not in cols: cur.execute("ALTER TABLE products ADD COLUMN tg_file_id TEXT")
+    if "genres" not in cols: cur.execute("ALTER TABLE products ADD COLUMN genres TEXT")
+    if "last_updated" not in cols: cur.execute("ALTER TABLE products ADD COLUMN last_updated TEXT")
     
     try:
         cur.execute("PRAGMA index_list(products)")
@@ -262,25 +259,21 @@ def db_init():
                     has_unique_title = True
                     break
         if not has_unique_title:
-            logger.info("[DB] Создаю уникальный индекс на title...")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_title ON products(title)")
     except Exception as e:
-        logger.warning(f"[DB] Не удалось создать уникальный индекс: {e}")
+        logger.warning(f"[DB] Ошибка индекса: {e}")
     
     _db_conn.commit()
-    logger.info("[DB] База данных инициализирована и мигрирована.")
+    logger.info("[DB] База данных инициализирована.")
 
 def db_query(sql, params=(), fetch=False, fetchone=False):
     with _db_lock:
         try:
             cur = _db_conn.cursor()
             cur.execute(sql, params)
-            if fetch:
-                result = cur.fetchall()
-            elif fetchone:
-                result = cur.fetchone()
-            else:
-                result = None
+            if fetch: result = cur.fetchall()
+            elif fetchone: result = cur.fetchone()
+            else: result = None
             _db_conn.commit()
             return result
         except Exception as e:
@@ -292,11 +285,9 @@ def is_ascii_digits(s: str) -> bool:
     return bool(s) and s.isascii() and s.isdigit()
 
 def safe_html_truncate(text: str, limit: int = 200) -> str:
-    if not text:
-        return ""
+    if not text: return ""
     text = html.escape(text, quote=False)
-    if len(text) <= limit:
-        return text
+    if len(text) <= limit: return text
     return text[:limit] + "..."
 
 def escape_like(s: str) -> str:
@@ -304,15 +295,13 @@ def escape_like(s: str) -> str:
 
 def check_premium(user_id: int) -> bool:
     res = db_query("SELECT premium_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not res or not res[0]:
-        return False
+    if not res or not res[0]: return False
     dt = parse_dt(res[0])
     return bool(dt and dt > utcnow())
 
 def get_premium_until(user_id: int):
     res = db_query("SELECT premium_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not res or not res[0]:
-        return None
+    if not res or not res[0]: return None
     return parse_dt(res[0])
 
 def add_premium_days(user_id: int, days: int):
@@ -320,7 +309,7 @@ def add_premium_days(user_id: int, days: int):
     now = utcnow()
     new_expiry = (current + timedelta(days=days)) if (current and current > now) else (now + timedelta(days=days))
     db_query("UPDATE users SET premium_until = ? WHERE user_id = ?", (new_expiry.isoformat(), user_id))
-    logger.info(f"[PREMIUM] +{days} дней пользователю {user_id}. Новая дата: {new_expiry}")
+    logger.info(f"[PREMIUM] +{days} дней пользователю {user_id}.")
 
 def favorites_limit(user_id: int) -> int:
     return FAVORITES_LIMIT_PREMIUM if check_premium(user_id) else FAVORITES_LIMIT_FREE
@@ -329,26 +318,20 @@ def favorites_count(user_id: int) -> int:
     return db_query("SELECT COUNT(*) FROM favorites WHERE user_id = ?", (user_id,), fetchone=True)[0]
 
 def list_premium_users() -> list:
-    return db_query(
-        "SELECT user_id, username, first_name, premium_until FROM users WHERE premium_until > ?",
-        (utcnow_iso(),), fetch=True,
-    )
+    return db_query("SELECT user_id, username, first_name, premium_until FROM users WHERE premium_until > ?", (utcnow_iso(),), fetch=True)
 
 def grant_premium_by_id(user_id: int, days: int) -> bool:
     row = db_query("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not row:
-        return False
+    if not row: return False
     add_premium_days(user_id, days)
     return True
 
 def revoke_premium(user_id: int) -> bool:
     row = db_query("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not row:
-        return False
+    if not row: return False
     db_query("UPDATE users SET premium_until = NULL WHERE user_id = ?", (user_id,))
     return True
 
-# ---------- ЖАНРЫ ----------
 def get_user_genres(user_id: int) -> list:
     rows = db_query("SELECT genre FROM user_genres WHERE user_id = ?", (user_id,), fetch=True)
     return [row[0] for row in rows]
@@ -356,13 +339,11 @@ def get_user_genres(user_id: int) -> list:
 def toggle_user_genre(user_id: int, genre: str) -> str:
     current = get_user_genres(user_id)
     limit = GENRES_LIMIT_PREMIUM if check_premium(user_id) else GENRES_LIMIT_FREE
-    
     if genre in current:
         db_query("DELETE FROM user_genres WHERE user_id = ? AND genre = ?", (user_id, genre))
         return "removed"
     else:
-        if len(current) >= limit:
-            return "limit"
+        if len(current) >= limit: return "limit"
         db_query("INSERT OR IGNORE INTO user_genres (user_id, genre) VALUES (?, ?)", (user_id, genre))
         return "added"
 
@@ -380,7 +361,6 @@ async def download_image(url: str) -> bytes | None:
                 if resp.status != 200: return None
                 data = await resp.read()
                 if not data or len(data) < 100: return None
-                
                 while _image_cache_size + len(data) > IMAGE_CACHE_MAX_BYTES and IMAGE_CACHE:
                     _, old = IMAGE_CACHE.popitem(last=False)
                     _image_cache_size -= len(old)
@@ -395,7 +375,6 @@ def apply_watermark(image_bytes: bytes) -> bytes:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         width, height = img.size
-        
         watermark = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(watermark)
         
@@ -405,42 +384,33 @@ def apply_watermark(image_bytes: bytes) -> bytes:
             try:
                 logo_copy = logo.copy()
                 logo_copy.thumbnail((60, 60), Image.Resampling.LANCZOS)
-                
                 shadow = Image.new("RGBA", logo_copy.size, (0, 0, 0, 0))
                 shadow.paste((0, 0, 0, 150), (0, 0, logo_copy.width, logo_copy.height), logo_copy)
                 watermark.paste(shadow, (logo_x + 2, logo_y + 2), shadow)
-                
                 watermark.paste(logo_copy, (logo_x, logo_y), logo_copy)
-            except Exception as e:
-                logger.warning(f"[Watermark] Ошибка загрузки логотипа: {e}")
-
-        try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18) 
-        except IOError:
-            font = ImageFont.load_default()
+            except Exception: pass
             
+        try: font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18) 
+        except IOError: font = ImageFont.load_default()
+        
         text = "BeaconKeys"
         bbox = draw.textbbox((0, 0), text, font=font)
         text_height = bbox[3] - bbox[1]
-        
-        text_x = 20
-        text_y = height - text_height - 20 
+        text_x, text_y = 20, height - text_height - 20 
         
         stroke_width = 2
         for dx in range(-stroke_width, stroke_width + 1):
             for dy in range(-stroke_width, stroke_width + 1):
                 if dx != 0 or dy != 0:
                     draw.text((text_x + dx, text_y + dy), text, font=font, fill=(0, 0, 0, 255))
-        
         draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
         
         out = Image.alpha_composite(img, watermark)
-        
         output = io.BytesIO()
         out.convert("RGB").save(output, format="JPEG", quality=90)
         return output.getvalue()
     except Exception as e:
-        logger.error(f"[Watermark] Ошибка наложения: {e}")
+        logger.error(f"[Watermark] {e}")
         return image_bytes
 
 async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_url: str | None, caption: str, reply_markup) -> bool:
@@ -458,19 +428,13 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
         except TelegramForbiddenError:
             logger.info(f"[PHOTO] Пользователь {chat_id} заблокировал бота. Удаляем из базы.")
             db_query("DELETE FROM users WHERE user_id = ?", (chat_id,))
-            db_query("DELETE FROM user_genres WHERE user_id = ?", (chat_id,))
             db_query("DELETE FROM favorites WHERE user_id = ?", (chat_id,))
-            db_query("DELETE FROM link_clicks WHERE user_id = ?", (chat_id,))
             return False
-        except Exception as e:
-            logger.warning(f"[PHOTO] Ошибка отправки {chat_id}: {e}")
-            return False
+        except Exception: return False
             
     if not image_url: return False
-    
     data = await download_image(image_url)
     if not data: return False
-    
     data = apply_watermark(data)
     
     try:
@@ -479,15 +443,10 @@ async def send_game_photo(bot: Bot, chat_id: int, product_id: int | None, image_
             db_query("UPDATE products SET tg_file_id = ? WHERE id = ?", (msg.photo[-1].file_id, product_id))
         return True
     except TelegramForbiddenError:
-        logger.info(f"[PHOTO] Пользователь {chat_id} заблокировал бота (при отправке файла). Удаляем из базы.")
         db_query("DELETE FROM users WHERE user_id = ?", (chat_id,))
-        db_query("DELETE FROM user_genres WHERE user_id = ?", (chat_id,))
         db_query("DELETE FROM favorites WHERE user_id = ?", (chat_id,))
-        db_query("DELETE FROM link_clicks WHERE user_id = ?", (chat_id,))
         return False
-    except Exception as e:
-        logger.warning(f"[PHOTO] {e}")
-        return False
+    except Exception: return False
 
 # ---------- ПАРСЕР STEAM ----------
 async def _steam_get_details(session, app_id):
@@ -504,8 +463,7 @@ async def _steam_get_details(session, app_id):
                     result["price_overview"] = game_data.get("price_overview")
                     result["type"] = game_data.get("type", "game")
                     genres = game_data.get("genres", [])
-                    if genres:
-                        result["genres"] = ",".join([g["description"] for g in genres])
+                    if genres: result["genres"] = ",".join([g["description"] for g in genres])
     except Exception: pass
     return result
 
@@ -517,17 +475,11 @@ def _format_price(price_overview) -> tuple[str, str, str]:
     discount = price_overview.get("discount_percent", 0)
 
     if currency == "RUB":
-        final_str = f"{final:.0f} ₽"
-        original_str = f"{initial:.0f} ₽" if discount else ""
-        discount_str = f"-{discount}%" if discount else ""
+        final_str = f"{final:.0f} ₽"; original_str = f"{initial:.0f} ₽" if discount else ""; discount_str = f"-{discount}%" if discount else ""
     elif currency == "USD":
-        final_str = f"${final:.2f}"
-        original_str = f"${initial:.2f}" if discount else ""
-        discount_str = f"-{discount}%" if discount else ""
+        final_str = f"${final:.2f}"; original_str = f"${initial:.2f}" if discount else ""; discount_str = f"-{discount}%" if discount else ""
     else:
-        final_str = f"{final:.2f} {currency}"
-        original_str = f"{initial:.2f} {currency}" if discount else ""
-        discount_str = f"-{discount}%" if discount else ""
+        final_str = f"{final:.2f} {currency}"; original_str = f"{initial:.2f} {currency}" if discount else ""; discount_str = f"-{discount}%" if discount else ""
     return final_str, original_str, discount_str
 
 async def fetch_steam_deals():
@@ -540,32 +492,18 @@ async def fetch_steam_deals():
                 if resp.status != 200: return
                 data = await resp.json()
     except Exception as e:
-        logger.warning(f"[PARSER] {e}")
-        return
+        logger.warning(f"[PARSER] {e}"); return
 
     added = 0
     async with aiohttp.ClientSession() as session:
-        items_to_check = []
-        for item in data.get("specials", {}).get("items", []):
-            items_to_check.append(item)
-        for section_key in ("top_sellers", "new_releases"):
-            for item in data.get(section_key, {}).get("items", []):
-                items_to_check.append(item)
-
+        items_to_check = data.get("specials", {}).get("items", []) + data.get("top_sellers", {}).get("items", []) + data.get("new_releases", {}).get("items", [])
         for item in items_to_check:
             title, app_id = item.get("name"), item.get("id")
             if not title or not app_id: continue
 
             det = await _steam_get_details(session, app_id)
-            
-            if det["type"] != "game":
-                continue
-            if re.search(r'(soundtrack|ost|artbook|art book|dlc|expansion|season pass)', title, re.IGNORECASE):
-                continue
-            if "additional content for" in det["description"].lower():
-                continue
-            if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0:
-                continue
+            if det["type"] != "game" or re.search(r'(soundtrack|ost|artbook|art book|dlc|expansion|season pass)', title, re.IGNORECASE) or "additional content for" in det["description"].lower(): continue
+            if not det["price_overview"] or det["price_overview"].get("discount_percent", 0) == 0: continue
 
             shop_url = f"https://store.steampowered.com/app/{app_id}/"
             f_str, o_str, d_str = _format_price(det["price_overview"])
@@ -577,177 +515,85 @@ async def fetch_steam_deals():
                     INSERT INTO products (title, price, old_price, discount, url, image, description, price_usd, genres, last_updated)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(title) DO UPDATE SET
-                        price=excluded.price,
-                        old_price=excluded.old_price,
-                        discount=excluded.discount,
-                        image=excluded.image,
-                        description=excluded.description,
-                        genres=excluded.genres,
-                        last_updated=excluded.last_updated
+                        price=excluded.price, old_price=excluded.old_price, discount=excluded.discount,
+                        image=excluded.image, description=excluded.description, genres=excluded.genres, last_updated=excluded.last_updated
                 """, (title, f_str or "Бесплатно", o_str, d_str, shop_url, det["image"], det["description"], price_usd, det["genres"], now_str))
                 added += 1
             except Exception as e:
                 logger.error(f"[PARSER] Ошибка вставки «{title}»: {e}")
-            
             await asyncio.sleep(0.2)
-
     logger.info(f"[PARSER] Обновлено/добавлено игр: {added}")
 
 # ---------- ЕЖЕДНЕВНАЯ СКИДКА ----------
 async def send_daily_deal(bot: Bot):
-    logger.info("[DAILY] Запуск рассылки «Скидка дня»...")
     users = [row[0] for row in db_query("SELECT user_id FROM users", fetch=True)]
-    if not users:
-        logger.warning("[DAILY] Нет пользователей в базе.")
-        return
-    logger.info(f"[DAILY] Пользователей: {len(users)}")
+    if not users: return
+    pool = db_query("SELECT id, title, price, old_price, discount, url, image, description FROM products WHERE image IS NOT NULL LIMIT 500", fetch=True)
+    if not pool: return
     
-    pool = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' LIMIT 500", fetch=True)
-    if not pool:
-        logger.warning("[DAILY] Нет игр в базе для рассылки.")
-        return
-    logger.info(f"[DAILY] Игр в пуле: {len(pool)}")
-    
-    sent, blocked, errors = 0, 0, 0
+    sent, blocked = 0, 0
     for uid in users:
-        pid, title, price, old_price, discount, url, image, description, price_usd = random.choice(pool)
+        pid, title, price, old_price, discount, url, image, description = random.choice(pool)
         text = f"🎲 <b>Скидка дня: {html.escape(title)}</b>\n\n"
         if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
         if price: text += f"💵 Цена: <b>{price}</b>\n"
         if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
         if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Купить в Steam", url=url)],
-            [InlineKeyboardButton(text="🎲 Ещё случайная", callback_data="random_again")]
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)], [InlineKeyboardButton(text="🎲 Ещё", callback_data="random_again")]])
         ok = await send_game_photo(bot, uid, pid, image, text, kb)
         if not ok:
             try:
                 await bot.send_message(chat_id=uid, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
                 sent += 1
-            except TelegramBadRequest as e:
-                if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
-                    db_query("DELETE FROM users WHERE user_id = ?", (uid,))
-                    db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
-                    db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
-                    db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
-                blocked += 1
-            except TelegramForbiddenError:
+            except Exception:
                 db_query("DELETE FROM users WHERE user_id = ?", (uid,))
-                db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
-                db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
-                db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
                 blocked += 1
-            except Exception as e:
-                logger.error(f"[DAILY] Ошибка для {uid}: {e}")
-                errors += 1
-        else:
-            sent += 1
+        else: sent += 1
         await asyncio.sleep(0.07)
-    
-    logger.info(f"[DAILY] Отправлено: {sent}, заблокировали: {blocked}, ошибок: {errors}")
+    logger.info(f"[DAILY] Отправлено: {sent}, заблокировали: {blocked}")
 
-# ---------- ЕЖЕДНЕВНАЯ СТАТИСТИКА В ЧАТ ОТЗЫВОВ ----------
+# ---------- СТАТИСТИКА ----------
 async def send_daily_stats(bot: Bot):
-    logger.info("[STATS] Собираем ежедневную статистику...")
-    
     total_users = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
     total_products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
     total_favorites = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
-    
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None).isoformat()
     new_users = db_query("SELECT COUNT(*) FROM users WHERE joined_at > ?", (yesterday,), fetchone=True)[0]
-    
     premium_users = db_query("SELECT COUNT(*) FROM users WHERE premium_until > ?", (utcnow_iso(),), fetchone=True)[0]
-    
     revenue_row = db_query("SELECT SUM(amount) FROM payments WHERE status = 'confirmed' AND created_at > ?", (yesterday,), fetchone=True)
     revenue_24h = revenue_row[0] if revenue_row and revenue_row[0] else 0
-    
     clicks_steam = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'steam%' AND clicked_at > ?", (yesterday,), fetchone=True)[0]
     clicks_mobile = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'mobile%' AND clicked_at > ?", (yesterday,), fetchone=True)[0]
-    
     new_refs = db_query("SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL AND joined_at > ?", (yesterday,), fetchone=True)[0]
     
-    top_games = db_query("""
-        SELECT title, clicks FROM products 
-        WHERE clicks > 0 
-        ORDER BY clicks DESC LIMIT 3
-    """, fetch=True)
-    top_games_text = ""
-    for t, c in top_games:
-        top_games_text += f"  • {html.escape(t[:30])} — {c} кликов\n"
-    if not top_games_text:
-        top_games_text = "  • Пока нет данных\n"
-
     text = (
-        f"📊 <b>ЕЖЕДНЕВНАЯ СТАТИСТИКА БОТА</b>\n"
-        f"📅 {datetime.now(timezone.utc).strftime('%d.%m.%Y')}\n\n"
-        
-        f"👥 <b>Пользователи:</b>\n"
-        f"  • Всего: <b>{total_users}</b>\n"
-        f"  • Новых за 24ч: <b>+{new_users}</b>\n"
-        f"  • Премиум: <b>{premium_users}</b>\n"
-        f"  • Пришло по рефке: <b>{new_refs}</b>\n\n"
-        
-        f"💰 <b>Финансы:</b>\n"
-        f"  • Заработано за 24ч: <b>{revenue_24h} ⭐</b>\n\n"
-        
-        f"📈 <b>Активность (за 24ч):</b>\n"
-        f"  • Кликов Steam: <b>{clicks_steam}</b>\n"
-        f"  • Кликов Mobile: <b>{clicks_mobile}</b>\n"
-        f"  • В избранном: <b>{total_favorites}</b> игр\n"
-        f"  • В базе: <b>{total_products}</b> игр\n\n"
-        
-        f"🔥 <b>Топ-3 игры по кликам:</b>\n"
-        f"{top_games_text}\n"
-        
+        f"📊 <b>ЕЖЕДНЕВНАЯ СТАТИСТИКА БОТА</b>\n📅 {datetime.now(timezone.utc).strftime('%d.%m.%Y')}\n\n"
+        f"👥 <b>Пользователи:</b>\n  • Всего: <b>{total_users}</b>\n  • Новых за 24ч: <b>+{new_users}</b>\n  • Премиум: <b>{premium_users}</b>\n  • Пришло по рефке: <b>{new_refs}</b>\n\n"
+        f"💰 <b>Финансы:</b>\n  • Заработано за 24ч: <b>{revenue_24h} ⭐</b>\n\n"
+        f"📈 <b>Активность (за 24ч):</b>\n  • Кликов Steam: <b>{clicks_steam}</b>\n  • Кликов Mobile: <b>{clicks_mobile}</b>\n  • В избранном: <b>{total_favorites}</b> игр\n  • В базе: <b>{total_products}</b> игр\n\n"
         f"<i>Отчет сформирован автоматически.</i>"
     )
+    try: await bot.send_message(chat_id=REVIEW_CHAT_ID, text=text, parse_mode=ParseMode.HTML)
+    except Exception as e: logger.error(f"[STATS] {e}")
 
-    try:
-        await bot.send_message(chat_id=REVIEW_CHAT_ID, text=text, parse_mode=ParseMode.HTML)
-        logger.info("[STATS] Ежедневный отчет отправлен.")
-    except Exception as e:
-        logger.error(f"[STATS] Ошибка отправки отчета: {e}")
-
-# ---------- УВЕДОМЛЕНИЯ ИЗБРАННОГО (ДЛЯ ВСЕХ) ----------
+# ---------- УВЕДОМЛЕНИЯ ----------
 async def notify_favorites_matches(bot: Bot):
-    # Премиум — получают уведомления всегда
-    # Обычные — не чаще 1 раза в неделю (по факту просто реже проверяем)
-    
-    # 1. Сначала обрабатываем всех, у кого есть избранное
     rows = db_query("""
         SELECT f.user_id, p.id, p.title, p.price, p.discount, p.url, p.image, p.description, u.premium_until, u.last_daily_bonus
-        FROM favorites f 
-        JOIN products p ON p.id = f.product_id 
-        JOIN users u ON u.user_id = f.user_id 
+        FROM favorites f JOIN products p ON p.id = f.product_id JOIN users u ON u.user_id = f.user_id 
         WHERE p.discount IS NOT NULL AND p.discount != '' 
         AND NOT EXISTS (SELECT 1 FROM notified_favorites nf WHERE nf.user_id = f.user_id AND nf.product_id = p.id)
         LIMIT 50
     """, fetch=True)
     
-    if not rows: return
-    
     for uid, pid, title, price, discount, url, image, desc, prem_until, last_bonus in rows:
-        # Проверяем, премиум ли пользователь
-        is_prem = False
-        if prem_until:
-            dt = parse_dt(prem_until)
-            if dt and dt > utcnow():
-                is_prem = True
-        
-        # Если НЕ премиум — отправляем уведомление только раз в 7 дней (по last_daily_bonus как маркеру)
+        is_prem = bool(prem_until and parse_dt(prem_until) > utcnow())
         if not is_prem:
-            if last_bonus:
-                last_dt = parse_dt(last_bonus)
-                if last_dt and (utcnow() - last_dt).days < 7:
-                    continue
-            # Обновляем маркер, чтобы 7 дней не спамить
+            if last_bonus and (utcnow() - parse_dt(last_bonus)).days < 7: continue
             db_query("UPDATE users SET last_daily_bonus = ? WHERE user_id = ?", (utcnow_iso(), uid))
         
         text = f"⭐ <b>Игра из Избранного в скидке!</b>\n\n🎮 {html.escape(title)}\n💵 {price}\n🔥 {discount}\n\n📝 <i>{safe_html_truncate(desc or '', 100)}...</i>"
-        if not is_prem:
-            text += "\n\n💎 <i>Бесплатные пользователи получают уведомления раз в неделю. Купи Премиум для мгновенных алертов!</i>"
+        if not is_prem: text += "\n\n💎 <i>Купи Премиум для мгновенных алертов!</i>"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)]])
         ok = await send_game_photo(bot, uid, pid, image, text, kb)
@@ -757,41 +603,65 @@ async def notify_favorites_matches(bot: Bot):
         db_query("INSERT OR IGNORE INTO notified_favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
         await asyncio.sleep(0.05)
 
-# ---------- УВЕДОМЛЕНИЯ О СУПЕР-СКИДКАХ (ДАЙДЖЕСТ) ----------
 async def notify_premium_super_deals(bot: Bot):
-    super_deals = db_query("SELECT p.id, p.title, p.price, p.discount, p.url, p.image, p.description FROM products p LEFT JOIN notified_deals n ON n.product_id = p.id WHERE CAST(REPLACE(p.discount, '-', '') AS INTEGER) >= 80 AND p.discount IS NOT NULL AND p.discount != '' AND n.product_id IS NULL LIMIT 5", fetch=True)
+    super_deals = db_query("SELECT p.id, p.title, p.price, p.discount, p.url FROM products p LEFT JOIN notified_deals n ON n.product_id = p.id WHERE CAST(REPLACE(p.discount, '-', '') AS INTEGER) >= 80 AND p.discount IS NOT NULL AND n.product_id IS NULL LIMIT 5", fetch=True)
     if not super_deals: return
     premium_users = db_query("SELECT user_id FROM users WHERE premium_until > ?", (utcnow_iso(),), fetch=True)
     
     digest_text = "🔥 <b>СУПЕР-СКИДКИ ДНЯ (80%+)</b>\n\n"
-    for i, (pid, title, price, discount, url, image, description) in enumerate(super_deals, 1):
+    for i, (pid, title, price, discount, url) in enumerate(super_deals, 1):
         digest_text += f"{i}. {html.escape(title)} — <b>{price}</b> ({discount})\n"
-    digest_text += "\n<i>Нажми на игру ниже, чтобы купить.</i>"
     
-    kb_rows = []
-    for pid, title, price, discount, url, image, description in super_deals:
-        kb_rows.append([InlineKeyboardButton(text=f"🛒 {title[:30]}...", url=url)])
+    kb_rows = [[InlineKeyboardButton(text=f"🛒 {t[:30]}...", url=u)] for _, t, _, _, u in super_deals]
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     
     for (uid,) in premium_users:
-        try:
-            await bot.send_message(chat_id=uid, text=digest_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        except TelegramForbiddenError:
-            db_query("DELETE FROM users WHERE user_id = ?", (uid,))
-            db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
-            db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
-            db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
+        try: await bot.send_message(chat_id=uid, text=digest_text, reply_markup=kb, parse_mode=ParseMode.HTML)
         except Exception: pass
         await asyncio.sleep(0.05)
     
     for pid, *_ in super_deals:
         db_query("INSERT OR IGNORE INTO notified_deals (product_id, notified_at) VALUES (?, ?)", (pid, utcnow_iso()))
 
+# ---------- FAZERCARDS API ----------
+async def fazer_request(method: str, endpoint: str, data: dict = None) -> dict | None:
+    if not FAZER_API_KEY: return None
+    url = f"{FAZER_API_BASE}{endpoint}"
+    headers = {"X-API-Key": FAZER_API_KEY, "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            if method == "GET":
+                async with session.get(url, headers=headers, timeout=15) as resp:
+                    if resp.status != 200: return None
+                    return await resp.json()
+            elif method == "POST":
+                async with session.post(url, headers=headers, json=data, timeout=15) as resp:
+                    if resp.status != 200: return None
+                    return await resp.json()
+    except Exception as e:
+        logger.error(f"[FAZER] Ошибка запроса {endpoint}: {e}")
+        return None
+
+async def fazer_get_rates() -> dict | None:
+    return await fazer_request("GET", "/steam-topup/rates")
+
+async def fazer_check_login(login: str) -> bool:
+    res = await fazer_request("POST", "/steam-topup/check-login", {"steamLogin": login})
+    return res.get("can_refill", False) if res and res.get("ok") else False
+
+async def fazer_get_balance() -> float | None:
+    res = await fazer_request("GET", "/balance")
+    return float(res.get("balance", 0)) if res and res.get("ok") else None
+
+async def fazer_create_order(login: str, currency: str, amount: float) -> dict | None:
+    res = await fazer_request("POST", "/steam-topup/order", {"steamLogin": login, "currency": currency, "amount": amount})
+    return res.get("order") if res and res.get("ok") else None
+
 # ---------- КЛАВИАТУРЫ ----------
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра"), KeyboardButton(text="💳 Пополнить Steam")],
+            [KeyboardButton(text="🔥 Скидки"), KeyboardButton(text="🎲 Случайная игра"), KeyboardButton(text="💳 Пополнить Steam (Авто)")],
             [KeyboardButton(text="📱 Мобильные игры"), KeyboardButton(text="💎 Премиум"), KeyboardButton(text="👤 Профиль")],
             [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="⭐ Оставить отзыв"), KeyboardButton(text="🆘 Поддержка")],
         ],
@@ -805,7 +675,8 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="👥 Рефералы")],
             [KeyboardButton(text="🎁 Выдать премиум"), KeyboardButton(text="🚫 Снять премиум")],
             [KeyboardButton(text="🎟 Промокоды"), KeyboardButton(text="📢 Рассылка")],
-            [KeyboardButton(text="🧪 Тест скидки дня"), KeyboardButton(text="⬅️ В меню")],
+            [KeyboardButton(text="💰 Баланс FazerCards"), KeyboardButton(text="🧪 Тест скидки дня")],
+            [KeyboardButton(text="⬅️ В меню")],
         ],
         resize_keyboard=True,
     )
@@ -820,46 +691,35 @@ def promo_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 # ---------- FSM ----------
-class FavoritesFSM(StatesGroup):
-    waiting_title = State()
-
+class FavoritesFSM(StatesGroup): waiting_title = State()
 class TopUpFSM(StatesGroup):
     waiting_login = State()
     waiting_amount = State()
-
+class SteamTopUpFSM(StatesGroup):
+    waiting_login = State()
+    waiting_amount = State()
 class AdminPremiumFSM(StatesGroup):
     waiting_user_id = State()
     waiting_days = State()
-
 class AdminBroadcastFSM(StatesGroup):
     waiting_message = State()
     waiting_confirm = State()
-
 class PromoFSM(StatesGroup):
     waiting_code = State()
     waiting_days = State()
     waiting_max_uses = State()
     waiting_expires = State()
-
-class UserPromoFSM(StatesGroup):
-    waiting_code = State()
-
-class ReviewFSM(StatesGroup):
-    waiting_text = State()
-
-class SearchFSM(StatesGroup):
-    waiting_query = State()
+class UserPromoFSM(StatesGroup): waiting_code = State()
+class ReviewFSM(StatesGroup): waiting_text = State()
+class SearchFSM(StatesGroup): waiting_query = State()
 
 # ---------- ERROR HANDLER ----------
 async def errors_handler(event, exception: Exception = None):
-    if exception is None and hasattr(event, 'exception'):
-        exception = event.exception
+    if exception is None and hasattr(event, 'exception'): exception = event.exception
     logger.exception(f"[ERROR] {type(exception).__name__}: {exception}")
     try:
-        if hasattr(event, 'message') and event.message:
-            await event.message.answer("⚠️ Что-то пошло не так. Попробуйте еще раз или напишите в поддержку.")
-        elif hasattr(event, 'callback_query') and event.callback_query:
-            await event.callback_query.answer("⚠️ Ошибка. Попробуйте еще раз.", show_alert=True)
+        if hasattr(event, 'message') and event.message: await event.message.answer("⚠️ Ошибка. Попробуйте позже.")
+        elif hasattr(event, 'callback_query') and event.callback_query: await event.callback_query.answer("⚠️ Ошибка.", show_alert=True)
     except Exception: pass
     return True
 
@@ -873,1256 +733,425 @@ async def global_cancel(message: Message, state: FSMContext):
 @router.message(Command("help"))
 async def help_cmd(message: Message):
     await message.answer(
-        "🆘 <b>Помощь по боту BeaconKeys</b>\n\n"
-        "🔥 <b>Скидки</b> — посмотреть актуальные скидки в Steam\n"
-        "🎲 <b>Случайная игра</b> — рулетка (1 раз в день, Премиум — безлимит)\n"
-        "🔍 <b>Поиск</b> — найти игру по названию\n"
-        "💳 <b>Пополнить Steam</b> — пополнение кошелька\n"
-        "📱 <b>Мобильные игры</b> — донат в Genshin, Brawl Stars и др.\n"
-        "💎 <b>Премиум</b> — подписка с расширенными лимитами\n"
-        "👤 <b>Профиль</b> — статистика, избранное, рефералы\n"
-        "⭐ <b>Оставить отзыв</b> — оценка бота (1 раз в 7 дней)\n\n"
-        "🎁 <b>Ежедневный бонус</b> — в профиле (7 дней подряд = 1 день Премиума)\n\n"
+        "🆘 <b>Помощь</b>\n\n"
+        "🔥 <b>Скидки</b> — актуальные скидки в Steam\n"
+        "🎲 <b>Случайная игра</b> — рулетка\n"
+        "🔍 <b>Поиск</b> — найти игру\n"
+        "💳 <b>Пополнить Steam (Авто)</b> — автоматическое пополнение через FazerCards\n"
+        "📱 <b>Мобильные игры</b> — донат\n"
+        "💎 <b>Премиум</b> — подписка\n"
+        "👤 <b>Профиль</b> — статистика, избранное\n"
+        "⭐ <b>Оставить отзыв</b> — оценка бота\n\n"
         "Команды:\n"
-        "/start — главное меню\n"
-        "/help — эта справка\n"
-        "/cancel — отмена действия\n"
-        "/admin — только для админов",
+        "/start, /help, /cancel, /admin",
         reply_markup=main_menu_kb()
     )
 
 # ---------- СТАРТ ----------
 @router.message(CommandStart())
 async def start_cmd(message: Message, command: CommandObject):
-    if _db_conn is None:
-        await message.answer("⚠️ Бот еще загружается. Попробуйте через минуту.")
-        return
-    
-    text = message.text or ""
+    if _db_conn is None: return
     referrer_id = None
-
     if command.args and command.args.startswith("ref_"):
-        try:
-            referrer_id = int(command.args[4:])
-        except ValueError:
-            pass
-
-    logger.info(f"[START] User: {message.from_user.id}, Referrer: {referrer_id}")
+        try: referrer_id = int(command.args[4:])
+        except ValueError: pass
 
     with _db_lock:
         try:
             cur = _db_conn.cursor()
-            cur.execute(
-                "INSERT OR IGNORE INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)",
-                (message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id)
-            )
+            cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)", (message.from_user.id, message.from_user.username, message.from_user.first_name, referrer_id))
             is_new = cur.rowcount > 0
             _db_conn.commit()
-        except Exception as e:
-            logger.error(f"[START] Ошибка БД: {e}")
-            is_new = False
+        except Exception: is_new = False
 
     if is_new:
-        logger.info(f"[START] New user created: {message.from_user.id}")
         if referrer_id and referrer_id != message.from_user.id:
-            ref_row = db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True)
-            if ref_row:
+            if db_query("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetchone=True):
                 add_premium_days(referrer_id, REF_BONUS_DAYS)
                 db_query("UPDATE users SET ref_bonus_claimed = 1 WHERE user_id = ?", (message.from_user.id,))
-                try:
-                    await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\nТебе начислено <b>+{REF_BONUS_DAYS} дня Премиума</b>! 👑")
-                except Exception as e:
-                    logger.warning(f"[REF] Не удалось отправить сообщение рефереру: {e}")
-                await message.answer(f"✅ Ты пришел по реферальной ссылке! Твой друг получил <b>+{REF_BONUS_DAYS} дня Премиума</b>.")
-            else:
-                logger.warning(f"[REF] Referrer {referrer_id} not found in DB")
+                try: await message.bot.send_message(referrer_id, f"🎉 <b>По твоей ссылке пришел друг!</b>\n\n+{REF_BONUS_DAYS} дня Премиума! 👑")
+                except Exception: pass
     else:
         db_query("UPDATE users SET username=?, first_name=? WHERE user_id=?", (message.from_user.username, message.from_user.first_name, message.from_user.id))
 
-    is_prem = check_premium(message.from_user.id)
-    premium_text = "\n👑 У тебя есть Премиум-доступ!" if is_prem else ""
+    await message.answer(f"👋 Привет, {html.escape(message.from_user.first_name or 'друг')}!\n\n🐷 Я бот для выгодных покупок.\nВыбирай раздел ниже 👇", reply_markup=main_menu_kb())
 
-    await message.answer(
-        f"👋 Привет, {html.escape(message.from_user.first_name or 'друг')}!\n\n"
-        "🐷 Я бот для выгодных покупок.\n"
-        "🔥 Самые жирные скидки на Steam-игры.\n"
-        "💳 Пополнение Steam и мобильных игр напрямую в кошелёк.\n"
-        f"{premium_text}\n"
-        "Выбирай раздел ниже 👇",
-        reply_markup=main_menu_kb(),
-    )
-
-# ---------- ПОИСК (С RATE LIMIT) ----------
+# ---------- ПОИСК ----------
 @router.message(F.text == "🔍 Поиск")
 async def search_start(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    now = time.time()
-    last_time = SEARCH_COOLDOWN.get(uid, 0)
-    if now - last_time < SEARCH_COOLDOWN_SEC:
-        await message.answer(f"⏳ Подожди {int(SEARCH_COOLDOWN_SEC - (now - last_time))} сек перед новым поиском.")
-        return
+    uid = message.from_user.id; now = time.time()
+    if now - SEARCH_COOLDOWN.get(uid, 0) < SEARCH_COOLDOWN_SEC:
+        await message.answer(f"⏳ Подожди {int(SEARCH_COOLDOWN_SEC - (now - SEARCH_COOLDOWN.get(uid, 0)))} сек."); return
     SEARCH_COOLDOWN[uid] = now
-    
     await state.set_state(SearchFSM.waiting_query)
-    await message.answer("🔍 <b>Поиск игр</b>\n\nВведите название игры, которую хотите найти:\n\n<i>Напишите «отмена», чтобы выйти.</i>",
-                         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
+    await message.answer("🔍 Введи название игры:\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
 
 @router.message(SearchFSM.waiting_query, F.text.in_(["⬅️ Отмена", "отмена", "Отмена", "/cancel"]))
 async def search_cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Поиск отменен.", reply_markup=main_menu_kb())
+    await state.clear(); await message.answer("❌ Поиск отменен.", reply_markup=main_menu_kb())
 
 @router.message(SearchFSM.waiting_query)
 async def search_results(message: Message, state: FSMContext):
     query = (message.text or "").strip()
-    if not query:
-        await message.answer("⚠️ Введите название игры.")
-        return
+    if not query: return
+    rows = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE title LIKE ? ESCAPE '\\' LIMIT 10", (f"%{escape_like(query)}%",), fetch=True)
+    if not rows: await message.answer("Ничего не найдено.", reply_markup=main_menu_kb()); await state.clear(); return
+    await state.clear(); await message.answer(f"🔍 Найдено: {len(rows)}", reply_markup=main_menu_kb()); await send_product_card(message, rows, 0, 0, len(rows))
 
-    pattern = f"%{escape_like(query)}%"
-    rows = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE title LIKE ? ESCAPE '\\' LIMIT 10", (pattern,), fetch=True)
-    
-    if not rows:
-        await message.answer(f"😔 По запросу «{html.escape(query)}» ничего не найдено.", reply_markup=main_menu_kb())
-        await state.clear()
-        return
-
-    await state.clear()
-    total = len(rows)
-    await message.answer(f"🔍 Найдено <b>{total}</b> игр. Показываю первую:", reply_markup=main_menu_kb())
-    await send_product_card(message, rows, 0, 0, total)
-
-# ---------- ПРОФИЛЬ ----------
+# ---------- ПРОФИЛЬ / ЖАНРЫ / БОНУС ----------
 @router.message(F.text == "👤 Профиль")
 async def profile_menu(message: Message):
-    uid = message.from_user.id
-    is_prem = check_premium(uid)
-    until = get_premium_until(uid)
-    joined = db_query("SELECT joined_at FROM users WHERE user_id = ?", (uid,), fetchone=True)
-    f_count, f_limit = favorites_count(uid), favorites_limit(uid)
-    
-    genres = get_user_genres(uid)
-    g_limit = GENRES_LIMIT_PREMIUM if is_prem else GENRES_LIMIT_FREE
-    g_text = ", ".join(genres) if genres else "не выбраны"
-
-    refs = db_query(
-        "SELECT username, first_name FROM users WHERE referred_by = ? ORDER BY joined_at DESC LIMIT 20",
-        (uid,), fetch=True
-    )
-    ref_count = len(refs)
-    
-    # Реферальная статистика (п. 31)
-    ref_bonus_days = ref_count * REF_BONUS_DAYS
-
+    uid = message.from_user.id; is_prem = check_premium(uid); until = get_premium_until(uid)
+    refs = db_query("SELECT COUNT(*) FROM users WHERE referred_by = ?", (uid,), fetchone=True)[0]
     text = f"👤 <b>Твой профиль</b>\n\n🆔 ID: <code>{uid}</code>\n"
-    if joined and joined[0]: text += f"📅 С нами с: {joined[0][:10]}\n"
-    text += "\n"
-    if is_prem and until:
-        days_left = (until - utcnow()).days + 1
-        text += f"👑 Статус: <b>Премиум</b> (до {until.strftime('%d.%m.%Y')})\n⏳ Осталось: <b>{days_left} дн.</b>\n"
-    else:
-        text += "💎 Статус: <b>Обычный</b>\n"
-    text += f"\n⭐ <b>Избранное:</b> {f_count} / {f_limit} игр\n"
-    text += f"🎮 <b>Твои жанры:</b> {g_text} ({len(genres)}/{g_limit})\n"
-    text += f"\n👥 <b>Приглашено друзей:</b> {ref_count}\n"
-    text += f"👑 <b>Получено с рефералов:</b> {ref_bonus_days} дн. Премиума\n"
-
-    if refs:
-        text += "<b>Твои рефералы:</b>\n"
-        for uname, fname in refs:
-            name = f"@{uname}" if uname else (fname or "—")
-            text += f"• {html.escape(name)}\n"
-        if ref_count == 20:
-            text += "... (показаны последние 20)\n"
-
+    if is_prem and until: text += f"👑 Премиум до {until.strftime('%d.%m.%Y')}\n"
+    else: text += "💎 Обычный\n"
+    text += f"\n⭐ Избранное: {favorites_count(uid)} / {favorites_limit(uid)}\n🎮 Жанры: {', '.join(get_user_genres(uid)) or 'нет'}\n👥 Рефералы: {refs} (+{refs*REF_BONUS_DAYS} дн.)"
+    
     buttons = [
         [InlineKeyboardButton(text="🎁 Ежедневный бонус", callback_data="daily_bonus")],
-        [InlineKeyboardButton(text="🎁 Пригласить друга (+3 дня)", callback_data="show_ref_link")],
-        [InlineKeyboardButton(text="⭐ Мое Избранное", callback_data="fav_show")],
-        [InlineKeyboardButton(text="🎮 Выбрать жанры для рулетки", callback_data="genres_show")],
-        [InlineKeyboardButton(text="❤️ Поддержать проект", url=DONATE_URL)],
+        [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="show_ref_link")],
+        [InlineKeyboardButton(text="⭐ Избранное", callback_data="fav_show")],
+        [InlineKeyboardButton(text="🎮 Жанры", callback_data="genres_show")],
+        [InlineKeyboardButton(text="❤️ Поддержать", url=DONATE_URL)],
     ]
-    
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ---------- ЕЖЕДНЕВНЫЙ БОНУС ----------
 @router.callback_query(F.data == "daily_bonus")
 async def daily_bonus(cb: CallbackQuery):
-    uid = cb.from_user.id
-    now = utcnow()
-    today = now.date().isoformat()
-    
+    uid = cb.from_user.id; now = utcnow(); today = now.date().isoformat()
     res = db_query("SELECT last_daily_bonus, daily_bonus_streak FROM users WHERE user_id = ?", (uid,), fetchone=True)
-    last_bonus_str, streak = res if res else (None, 0)
-    
-    if last_bonus_str:
-        last_dt = parse_dt(last_bonus_str)
-        if last_dt and last_dt.date().isoformat() == today:
-            await cb.answer("✅ Ты уже получал бонус сегодня! Возвращайся завтра.", show_alert=True)
-            return
-        
-        # Если заходил вчера — стрик растет, если пропустил — сбрасывается
-        if last_dt and (now - last_dt).days == 1:
-            streak += 1
-        else:
-            streak = 1
-    else:
-        streak = 1
-    
-    # Обновляем
+    last, streak = res if res else (None, 0)
+    if last and parse_dt(last).date().isoformat() == today: await cb.answer("Уже получен!", show_alert=True); return
+    streak = streak + 1 if (last and (now - parse_dt(last)).days == 1) else 1
     db_query("UPDATE users SET last_daily_bonus = ?, daily_bonus_streak = ? WHERE user_id = ?", (now.isoformat(), streak, uid))
-    
-    # Награда
     if streak >= 7:
-        add_premium_days(uid, 1)
-        db_query("UPDATE users SET daily_bonus_streak = 0 WHERE user_id = ?", (uid,))
-        await cb.answer("🎉 Ты заходил 7 дней подряд! +1 день Премиума!", show_alert=True)
-        await cb.message.answer(f"🎉 <b>Ежедневный бонус!</b>\n\nТы заходил <b>7 дней подряд</b> и получаешь <b>+1 день Премиума</b>! 👑")
+        add_premium_days(uid, 1); db_query("UPDATE users SET daily_bonus_streak = 0 WHERE user_id = ?", (uid,))
+        await cb.message.answer("🎉 +1 день Премиума за 7 дней подряд!"); await cb.answer("Получено!")
     else:
-        await cb.answer(f"✅ Бонус получен! Стрик: {streak}/7", show_alert=True)
-        await cb.message.answer(f"🎁 <b>Ежедневный бонус получен!</b>\n\nТвой стрик: <b>{streak} / 7</b>\nЗаходи завтра, чтобы продолжить!")
+        await cb.message.answer(f"🎁 Бонус получен! Стрик: {streak}/7"); await cb.answer("Ок!")
 
-# ---------- ВЫБОР ЖАНРОВ ----------
 @router.callback_query(F.data == "genres_show")
 async def genres_show(cb: CallbackQuery):
-    uid = cb.from_user.id
-    is_prem = check_premium(uid)
-    limit = GENRES_LIMIT_PREMIUM if is_prem else GENRES_LIMIT_FREE
-    current = get_user_genres(uid)
-    
-    text = (
-        f"🎮 <b>Настройка жанров для рулетки</b>\n\n"
-        f"Выбери до <b>{limit}</b> жанров. Когда ты нажмешь «🎲 Случайная игра», "
-        f"бот будет искать игры только среди них.\n\n"
-        f"<i>Нажми на жанр, чтобы добавить или убрать его.</i>\n\n"
-        f"Выбрано: <b>{len(current)} / {limit}</b>"
-    )
-    
-    buttons = []
-    row = []
-    for genre in AVAILABLE_GENRES:
-        check = "✅ " if genre in current else ""
-        row.append(InlineKeyboardButton(text=f"{check}{genre}", callback_data=f"genre_toggle_{genre}"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-        
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад в профиль", callback_data="profile_back")])
-    
-    try:
-        await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    except TelegramBadRequest:
-        pass
+    uid = cb.from_user.id; limit = GENRES_LIMIT_PREMIUM if check_premium(uid) else GENRES_LIMIT_FREE; cur = get_user_genres(uid)
+    text = f"🎮 <b>Жанры для рулетки</b> (Выбрано: {len(cur)}/{limit})"
+    buttons, row = [], []
+    for g in AVAILABLE_GENRES:
+        row.append(InlineKeyboardButton(text=f"{'✅ ' if g in cur else ''}{g}", callback_data=f"genre_toggle_{g}"))
+        if len(row) == 2: buttons.append(row); row = []
+    if row: buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")])
+    try: await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception: pass
     await cb.answer()
 
 @router.callback_query(F.data.startswith("genre_toggle_"))
 async def genre_toggle(cb: CallbackQuery):
-    uid = cb.from_user.id
-    genre = cb.data.split("_", 2)[2]
-    res = toggle_user_genre(uid, genre)
-    
-    if res == "limit":
-        limit = GENRES_LIMIT_PREMIUM if check_premium(uid) else GENRES_LIMIT_FREE
-        await cb.answer(f"❌ Лимит жанров: {limit}.\nУбери один из выбранных или купи Премиум (до 10).", show_alert=True)
-        return
-    
+    uid = cb.from_user.id; g = cb.data.split("_", 2)[2]
+    if toggle_user_genre(uid, g) == "limit": await cb.answer("Лимит жанров!", show_alert=True); return
     await genres_show(cb)
 
 @router.callback_query(F.data == "profile_back")
-async def profile_back(cb: CallbackQuery):
-    await cb.answer()
-    await profile_menu(cb.message)
+async def profile_back(cb: CallbackQuery): await cb.answer(); await profile_menu(cb.message)
 
-# ---------- ОТЗЫВЫ ----------
-@router.message(F.text == "⭐ Оставить отзыв")
-async def review_start(message: Message):
-    uid = message.from_user.id
-    
-    res = db_query("SELECT last_review_date FROM users WHERE user_id = ?", (uid,), fetchone=True)
-    if res and res[0]:
-        last_date = parse_dt(res[0])
-        if last_date:
-            time_passed = utcnow() - last_date
-            if time_passed < timedelta(days=7):
-                days_left = 7 - time_passed.days
-                hours_left = (timedelta(days=7) - time_passed).seconds // 3600
-                await message.answer(
-                    f"⏳ <b>Вы уже оставляли отзыв недавно!</b>\n\n"
-                    f"Следующий отзыв можно оставить через <b>{days_left} дн. {hours_left} ч.</b>\n\n"
-                    f"<i>Мы ограничили частоту отзывов, чтобы они оставались честными и не спамили.</i>"
-                )
-                return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 ⭐", callback_data="rate_1"),
-         InlineKeyboardButton(text="2 ⭐", callback_data="rate_2"),
-         InlineKeyboardButton(text="3 ⭐", callback_data="rate_3"),
-         InlineKeyboardButton(text="4 ⭐", callback_data="rate_4"),
-         InlineKeyboardButton(text="5 ⭐", callback_data="rate_5")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="review_cancel")]
-    ])
-    await message.answer(
-        "⭐ <b>Оцените нашего бота!</b>\n\n"
-        "Поставьте оценку от 1 до 5 звезд, нажав на кнопку ниже. "
-        "После этого вы сможете написать небольшой комментарий.",
-        reply_markup=kb
-    )
-
-@router.callback_query(F.data.startswith("rate_"))
-async def review_rate(cb: CallbackQuery, state: FSMContext):
-    rating = int(cb.data.split("_")[1])
-    await state.update_data(rating=rating)
-    await state.set_state(ReviewFSM.waiting_text)
-    
-    await cb.message.edit_text(
-        f"Вы поставили оценку: <b>{rating} ⭐</b>\n\n"
-        "Теперь напишите небольшой комментарий о боте (что понравилось, что можно улучшить).\n\n"
-        "<i>Напишите «отмена», чтобы выйти.</i>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="review_cancel")]])
-    )
-    await cb.answer()
-
-@router.callback_query(F.data == "review_cancel")
-async def review_cancel(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    try: await cb.message.edit_text("❌ Оставление отзыва отменено.")
-    except Exception: pass
-    await cb.answer()
-
-@router.message(ReviewFSM.waiting_text)
-async def review_text(message: Message, state: FSMContext, bot: Bot):
-    text = (message.text or "").strip()
-    if text.lower() in ("отмена", "cancel", "/cancel"):
-        await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
-        return
-    
-    if len(text) < 5:
-        await message.answer("⚠️ Комментарий слишком короткий. Напишите хотя бы пару слов.")
-        return
-        
-    if len(text) > 1000:
-        await message.answer("⚠️ Комментарий слишком длинный (макс. 1000 символов).")
-        return
-
-    data = await state.get_data()
-    rating = data.get("rating", 5)
-    await state.clear()
-
-    db_query("UPDATE users SET last_review_date = ? WHERE user_id = ?", (utcnow_iso(), message.from_user.id))
-
-    user_info = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
-    review_msg = (
-        f"📩 <b>Новый отзыв о боте!</b>\n\n"
-        f"👤 <b>От:</b> {html.escape(user_info)} (<code>{message.from_user.id}</code>)\n"
-        f"⭐ <b>Оценка:</b> {rating}/5\n"
-        f"💬 <b>Комментарий:</b>\n{html.escape(text)}"
-    )
-
-    try:
-        await bot.send_message(chat_id=REVIEW_CHAT_ID, text=review_msg, parse_mode=ParseMode.HTML)
-        await message.answer(
-            "✅ <b>Спасибо за отзыв!</b>\n\n"
-            "Ваше мнение очень важно для нас, мы обязательно его учтем.\n"
-            "<i>Следующий отзыв можно будет оставить через 7 дней.</i>",
-            reply_markup=main_menu_kb()
-        )
-    except Exception as e:
-        logger.error(f"Ошибка отправки отзыва: {e}")
-        await message.answer(
-            "✅ Спасибо! Ваш отзыв сохранен, но произошла ошибка при отправке администратору.\n"
-            f"(Техническая причина: {type(e).__name__})",
-            reply_markup=main_menu_kb()
-        )
-
-# ---------- ПРЕМИУМ ----------
-async def premium_menu(message: Message, user_id: int | None = None):
-    uid = user_id if user_id is not None else message.from_user.id
-    is_prem = check_premium(uid)
-    until = get_premium_until(uid)
-    ref_count = db_query("SELECT COUNT(*) FROM users WHERE referred_by = ? AND ref_bonus_claimed = 1", (uid,), fetchone=True)[0]
-
-    status = ""
-    if is_prem and until:
-        status = f"👑 <b>Твой Премиум активен до {until.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
-
-    text = (
-        f"{status}"
-        "💎 <b>Премиум-доступ</b>\n\n"
-        "Открой все возможности бота:\n\n"
-        "🎲 <b>Безлимитная рулетка</b>\n"
-        "   <i>Крути сколько хочешь и находи лучшие скидки первым.</i>\n\n"
-        "🏆 <b>Только топовые скидки</b>\n"
-        "   <i>Рулетка выдает игры с максимальным процентом скидки.</i>\n\n"
-        "⭐ <b>Избранное до 30 игр</b>\n"
-        "   <i>Добавляй больше игр в список желаемого.</i>\n\n"
-        "🎮 <b>До 10 жанров в рулетке</b>\n"
-        "   <i>Настраивай рулетку под себя.</i>\n\n"
-        "🔔 <b>Мгновенные алерты</b>\n"
-        "   <i>Персональные уведомления, как только на игру из Избранного появляется скидка или цена падает ниже 80%.</i>\n\n"
-        "🎁 <b>Как получить Премиум БЕСПЛАТНО?</b>\n"
-        f"Пригласи друга по своей ссылке и получи <b>+{REF_BONUS_DAYS} дня Премиума</b> за каждого!\n\n"
-        f"👥 Ты уже пригласил: <b>{ref_count} чел.</b>\n"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🔥 7 дней — {STARS_7_DAYS} ⭐", callback_data="buy_premium_7")],
-        [InlineKeyboardButton(text=f"👑 30 дней — {STARS_30_DAYS} ⭐", callback_data="buy_premium_30")],
-        [InlineKeyboardButton(text=f"💎 6 месяцев — {STARS_180_DAYS} ⭐", callback_data="buy_premium_180")],
-        [InlineKeyboardButton(text=f"🏆 1 год — {STARS_365_DAYS} ⭐", callback_data="buy_premium_365")],
-    ])
-
-    await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
-
-@router.message(F.text == "💎 Премиум")
-async def premium_menu_msg(message: Message):
-    await premium_menu(message)
-
-@router.callback_query(F.data == "premium_show")
-async def premium_show(cb: CallbackQuery):
-    await cb.answer()
-    if cb.message: await premium_menu(cb.message, user_id=cb.from_user.id)
-
-@router.callback_query(F.data.startswith("buy_premium_"))
-async def buy_premium_stars(cb: CallbackQuery):
-    try:
-        days = int(cb.data.rsplit("_", 1)[1])
-    except (ValueError, IndexError):
-        await cb.answer("Ошибка тарифа", show_alert=True)
-        return
-
-    price_map = {
-        7:   STARS_7_DAYS,
-        30:  STARS_30_DAYS,
-        180: STARS_180_DAYS,
-        365: STARS_365_DAYS,
-    }
-    price = price_map.get(days)
-    if not price:
-        await cb.answer("Неизвестный тариф", show_alert=True)
-        return
-
-    prices = [LabeledPrice(label=f"Премиум на {days} дней", amount=price)]
-
-    try:
-        await cb.bot.send_invoice(
-            chat_id=cb.from_user.id,
-            title=f"Премиум-доступ на {days} дней",
-            description=f"Активация Премиум-доступа в боте BeaconKeys на {days} дней.",
-            payload=f"premium_{days}",
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            start_parameter="premium",
-        )
-        await cb.answer("Счет выставлен в чате!")
-    except Exception as e:
-        logger.error(f"Ошибка создания счета: {e}")
-        await cb.answer("❌ Ошибка создания счета. Попробуйте позже.", show_alert=True)
-
-@router.pre_checkout_query()
-async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
-    await pre_checkout_q.answer(ok=True)
-
-@router.message(F.successful_payment)
-async def successful_payment_handler(message: Message):
-    payment_info: SuccessfulPayment = message.successful_payment
-    
-    if payment_info.currency != "XTR":
-        logger.warning(f"[PAYMENT] Неверная валюта: {payment_info.currency}")
-        return
-    
-    try:
-        days = int(payment_info.invoice_payload.split("_")[1])
-    except (IndexError, ValueError):
-        days = 7
-
-    expected_price = {7: STARS_7_DAYS, 30: STARS_30_DAYS, 180: STARS_180_DAYS, 365: STARS_365_DAYS}.get(days)
-    if expected_price and payment_info.total_amount != expected_price:
-        logger.warning(f"[PAYMENT] Неверная сумма: {payment_info.total_amount} != {expected_price}")
-        return
-
-    add_premium_days(message.from_user.id, days)
-
-    try:
-        db_query("INSERT INTO payments (payment_id, user_id, amount, days, status) VALUES (?, ?, ?, ?, 'confirmed')",
-                 (payment_info.telegram_payment_charge_id, message.from_user.id, payment_info.total_amount, days))
-    except Exception as e:
-        logger.warning(f"[PAYMENT] Ошибка записи в БД: {e}")
-
-    await message.answer(
-        f"✅ <b>Оплата прошла успешно!</b>\n\n"
-        f"Вам начислено <b>+{days} дней Премиума</b>! 👑\n\n"
-        f"Спасибо за поддержку! 🙏",
-        reply_markup=main_menu_kb()
-    )
-    logger.info(f"[STARS] Пользователь {message.from_user.id} оплатил Премиум на {days} дней. Сумма: {payment_info.total_amount} XTR")
-
-# ---------- ССЫЛКА НА ДРУГА ----------
 @router.callback_query(F.data == "show_ref_link")
 async def show_ref_link(cb: CallbackQuery):
-    uid = cb.from_user.id
     bot_info = await cb.bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    await cb.message.answer(f"🔗 <b>Твоя ссылка:</b>\n<code>https://t.me/{bot_info.username}?start=ref_{cb.from_user.id}</code>", parse_mode=ParseMode.HTML); await cb.answer()
 
-    await cb.message.answer(
-        f"🔗 <b>Твоя реферальная ссылка:</b>\n\n"
-        f"<code>{ref_link}</code>\n\n"
-        f"<i>Нажми на ссылку, чтобы скопировать её, и отправь другу.</i>\n\n"
-        f"За каждого друга, который зайдет по ней, ты получишь <b>+{REF_BONUS_DAYS} дня Премиума</b>!",
-        parse_mode=ParseMode.HTML
-    )
-    await cb.answer()
+# ---------- ИЗБРАННОЕ ----------
+@router.callback_query(F.data.startswith("fav_add_"))
+async def fav_add(cb: CallbackQuery):
+    uid = cb.from_user.id; pid = int(cb.data.split("_")[2])
+    if favorites_count(uid) >= favorites_limit(uid): await cb.answer("Лимит!", show_alert=True); return
+    db_query("INSERT OR IGNORE INTO favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
+    await cb.answer("✅ Добавлено в избранное!")
+    prods = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE id = ?", (pid,), fetch=True)
+    if prods: await send_product_card(cb, prods, 0, 0, 1)
 
-# ---------- ВВОД ПРОМОКОДА (ЮЗЕР) ----------
-@router.message(F.text == "🎟 Промокод")
-async def user_promo_start(message: Message, state: FSMContext):
-    await state.set_state(UserPromoFSM.waiting_code)
-    await message.answer(
-        "🎟 <b>Введите промокод</b>\n\n"
-        "Отправьте сообщение с вашим промокодом, чтобы получить Премиум.\n\n"
-        "<i>Напишите «отмена» или нажмите кнопку ниже, чтобы выйти.</i>",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
-    )
+@router.callback_query(F.data == "fav_already")
+async def fav_already(cb: CallbackQuery): await cb.answer("Уже в избранном!")
 
-@router.message(UserPromoFSM.waiting_code, F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
-async def user_promo_cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Ввод промокода отменен.", reply_markup=main_menu_kb())
+@router.callback_query(F.data == "fav_show")
+async def fav_show(cb: CallbackQuery):
+    uid = cb.from_user.id; rows = db_query("SELECT p.id, p.title FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ?", (uid,), fetch=True)
+    if not rows: await cb.answer("Пусто", show_alert=True); return
+    text = f"⭐ <b>Избранное</b> ({len(rows)} / {favorites_limit(uid)}):\n\n"
+    buttons = [[InlineKeyboardButton(text=f"❌ {t[:20]}", callback_data=f"fav_del_{p}")] for p, t in rows]
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await cb.answer()
 
-@router.message(UserPromoFSM.waiting_code)
-async def user_promo_check(message: Message, state: FSMContext):
-    code = (message.text or "").strip().upper()
+@router.callback_query(F.data.startswith("fav_del_"))
+async def fav_del(cb: CallbackQuery):
+    db_query("DELETE FROM favorites WHERE product_id = ? AND user_id = ?", (int(cb.data.split("_")[2]), cb.from_user.id))
+    await cb.answer("Удалено"); await fav_show(cb)
 
-    if code in ("ОТМЕНА", "CANCEL", "/CANCEL"):
-        await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=main_menu_kb())
-        return
-
-    if not code:
-        await message.answer("⚠️ Введите код.")
-        return
-
-    promo = db_query("SELECT days, max_uses, uses_count, expires_at FROM promocodes WHERE code = ?", (code,), fetchone=True)
-    if not promo:
-        await message.answer("❌ Такого промокода не существует. Попробуйте еще раз или нажмите «Отмена».")
-        return
-
-    days, max_uses, uses_count, expires_at = promo
+# ---------- РУЛЕТКА ----------
+@router.message(F.text == "🎲 Случайная игра")
+async def random_game(message: Message):
+    uid = message.from_user.id; is_prem = check_premium(uid)
+    if not is_prem and db_query("SELECT last_roulette FROM users WHERE user_id = ?", (uid,), fetchone=True)[0].startswith(utcnow().date().isoformat()):
+        await message.answer("⏳ Лимит рулетки!"); return
     
-    if expires_at:
-        exp_date = parse_dt(expires_at)
-        if exp_date and utcnow() > exp_date:
-            await message.answer("❌ Этот промокод истек.")
-            return
+    games = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY RANDOM() LIMIT 1", fetchone=True)
+    if not games: return
+    if not is_prem: db_query("UPDATE users SET last_roulette = ? WHERE user_id = ?", (utcnow_iso(), uid))
+    pid, title, price, old_price, discount, url, image, description, price_usd = games
+    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
+    if price: text += f"💵 {price}\n"
+    if discount: text += f"🔥 {discount}\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)]])
+    await send_game_photo(message.bot, message.chat.id, pid, image, text, kb)
 
-    if uses_count >= max_uses:
-        await message.answer("❌ Этот промокод больше не действителен (лимит использований исчерпан).")
-        return
+@router.callback_query(F.data == "random_again")
+async def random_again(cb: CallbackQuery):
+    uid = cb.from_user.id; is_prem = check_premium(uid)
+    if not is_prem and utcnow() - parse_dt(db_query("SELECT last_random_again FROM users WHERE user_id = ?", (uid,), fetchone=True)[0]) < timedelta(minutes=10): await cb.answer("Жди 10 мин", show_alert=True); return
+    
+    game = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY RANDOM() LIMIT 1", fetchone=True)
+    await cb.answer()
+    if not game: return
+    if not is_prem: db_query("UPDATE users SET last_random_again = ? WHERE user_id = ?", (utcnow_iso(), uid))
+    pid, title, price, old_price, discount, url, image, description, price_usd = game
+    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
+    if price: text += f"💵 {price}\n"
+    if discount: text += f"🔥 {discount}\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Купить", url=url)]])
+    await send_game_photo(cb.bot, cb.message.chat.id, pid, image, text, kb)
 
-    already = db_query("SELECT 1 FROM promocode_uses WHERE code = ? AND user_id = ?", (code, message.from_user.id), fetchone=True)
-    if already:
-        await message.answer("❌ Вы уже использовали этот промокод.")
-        return
+# ---------- АВТО-ПОПОЛНЕНИЕ STEAM (FAZERCARDS) ----------
+@router.message(F.text == "💳 Пополнить Steam (Авто)")
+async def steam_topup_start(message: Message, state: FSMContext):
+    if not FAZER_API_KEY: await message.answer("❌ Авто-пополнение недоступно (нет ключа)."); return
+    bal = await fazer_get_balance()
+    if bal is None or bal < 1: await message.answer("❌ Ошибка баланса FazerCards."); return
+    await state.set_state(SteamTopUpFSM.waiting_login)
+    await message.answer("💳 <b>Пополнение Steam (Авто)</b>\n\nВведи <b>логин Steam</b>:\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
 
-    db_query("UPDATE promocodes SET uses_count = uses_count + 1 WHERE code = ?", (code,))
-    db_query("INSERT INTO promocode_uses (code, user_id) VALUES (?, ?)", (code, message.from_user.id))
-    add_premium_days(message.from_user.id, days)
+@router.message(SteamTopUpFSM.waiting_login)
+async def steam_topup_login(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.lower() in ("отмена", "cancel", "/cancel"): await state.clear(); await message.answer("❌ Отменено.", reply_markup=main_menu_kb()); return
+    if len(raw) < 3 or " " in raw: await message.answer("⚠️ Некорректный логин."); return
+    msg = await message.answer("⏳ Проверяю логин...")
+    if not await fazer_check_login(raw): await msg.edit_text(f"❌ Логин <b>{html.escape(raw)}</b> не найден."); return
+    await msg.edit_text(f"✅ Логин <b>{html.escape(raw)}</b> найден!\n\nВведи <b>сумму в рублях</b> (только цифры):")
+    await state.update_data(login=raw); await state.set_state(SteamTopUpFSM.waiting_amount)
 
+@router.message(SteamTopUpFSM.waiting_amount)
+async def steam_topup_amount(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.lower() in ("отмена", "cancel", "/cancel"): await state.clear(); await message.answer("❌ Отменено.", reply_markup=main_menu_kb()); return
+    if not is_ascii_digits(raw): await message.answer("⚠️ Только цифры."); return
+    amount_rub = int(raw)
+    if amount_rub < 15: await message.answer("⚠️ Минимум 15 ₽."); return
+    if amount_rub > 80000: await message.answer("⚠️ Максимум 80 000 ₽."); return
+    
+    rates = await fazer_get_rates()
+    if not rates: await message.answer("❌ Ошибка курса."); return
+    rate_rub = rates.get("rates", {}).get("RUB", 95)
+    amount_usd = round(amount_rub / rate_rub, 2)
+    
+    total_rub = int(amount_rub * (1 + FAZER_MARKUP_PERCENT / 100))
+    stars_price = int(total_rub / STARS_TO_RUB)
+    if stars_price < 1: stars_price = 1
+    
+    await state.update_data(amount_usd=amount_usd, amount_rub=amount_rub, stars_price=stars_price)
+    text = f"💳 <b>Заказ</b>\n👤 {html.escape((await state.get_data()).get('login'))}\n💵 {amount_rub} ₽ (≈ ${amount_usd})\n💰 Итого: {total_rub} ₽ (≈ {stars_price} ⭐)"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"💳 Оплатить {stars_price} ⭐", callback_data="steam_topup_pay")], [InlineKeyboardButton(text="❌ Отмена", callback_data="steam_topup_cancel")]])
+    await message.answer(text, reply_markup=kb)
+
+@router.callback_query(F.data == "steam_topup_pay")
+async def steam_topup_pay(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    login = data.get("login"); amount_usd = data.get("amount_usd"); stars_price = data.get("stars_price")
+    if not login or not amount_usd or not stars_price: await cb.answer("Ошибка. Начни заново.", show_alert=True); await state.clear(); return
+    prices = [LabeledPrice(label=f"Steam {login}", amount=stars_price)]
+    try:
+        await cb.bot.send_invoice(chat_id=cb.from_user.id, title=f"Пополнение Steam", description=f"Пополнение {login} на {amount_usd} USD", payload=f"steam_topup|{login}|{amount_usd}", provider_token="", currency="XTR", prices=prices, start_parameter="steam")
+        await cb.answer("Счет выставлен!")
+    except Exception as e: await cb.answer("Ошибка.", show_alert=True)
     await state.clear()
-    await message.answer(
-        f"✅ <b>Промокод активирован!</b>\n\n"
-        f"Вам начислено <b>+{days} дней Премиума</b>! 👑",
-        reply_markup=main_menu_kb()
-    )
 
-# ---------- СКИДКИ (С ФИЛЬТРАМИ) ----------
+@router.callback_query(F.data == "steam_topup_cancel")
+async def steam_topup_cancel(cb: CallbackQuery, state: FSMContext): await state.clear(); await cb.message.edit_text("❌ Отменено."); await cb.answer()
+
+# ---------- УСПЕШНАЯ ОПЛАТА ----------
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message, bot: Bot):
+    payload = message.successful_payment.invoice_payload
+    if payload.startswith("steam_topup|"):
+        parts = payload.split("|")
+        login = parts[1]; amount_usd = float(parts[2])
+        await message.answer("⏳ Оплата получена! Создаю заказ на FazerCards...")
+        order = await fazer_create_order(login, "USD", amount_usd)
+        if order: await message.answer(f"✅ <b>Успешно!</b>\n🆔 {order.get('id')}\n👤 {login}\n💵 ${amount_usd}\n\nСредства поступят в течение 15 минут.")
+        else: await message.answer(f"⚠️ Ошибка FazerCards. Напишите в поддержку {PLATI_SUPPORT} чек: {message.successful_payment.telegram_payment_charge_id}")
+        try: db_query("INSERT INTO payments (payment_id, user_id, amount, days, status) VALUES (?, ?, ?, 0, 'confirmed')", (message.successful_payment.telegram_payment_charge_id, message.from_user.id, message.successful_payment.total_amount))
+        except Exception: pass
+        return
+    try: days = int(payload.split("_")[1])
+    except: days = 7
+    add_premium_days(message.from_user.id, days)
+    try: db_query("INSERT INTO payments (payment_id, user_id, amount, days, status) VALUES (?, ?, ?, ?, 'confirmed')", (message.successful_payment.telegram_payment_charge_id, message.from_user.id, message.successful_payment.total_amount, days))
+    except Exception: pass
+    await message.answer(f"✅ <b>Оплата успешна!</b>\nНачислено {days} дней Премиума!", reply_markup=main_menu_kb())
+
+@router.pre_checkout_query()
+async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery): await pre_checkout_q.answer(ok=True)
+
+# ---------- ПРОЧЕЕ (ПОДДЕРЖКА, СКИДКИ, ПРЕМИУМ) ----------
+@router.message(F.text == "🆘 Поддержка")
+async def support_info(message: Message): await message.answer(f"🆘 Поддержка: {CONTACT_TG}", reply_markup=main_menu_kb())
+
 @router.message(F.text == "🔥 Скидки")
 async def discounts_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 90%+", callback_data="filter_90"),
-         InlineKeyboardButton(text="💸 До 100₽", callback_data="filter_cheap")],
-        [InlineKeyboardButton(text="🆕 Новинки", callback_data="filter_new")],
-        [InlineKeyboardButton(text="📜 Все скидки", callback_data="filter_all")],
+        [InlineKeyboardButton(text="🔥 90%+", callback_data="filter_90"), InlineKeyboardButton(text="💸 До 100₽", callback_data="filter_cheap")],
+        [InlineKeyboardButton(text="🆕 Новинки", callback_data="filter_new"), InlineKeyboardButton(text="📜 Все", callback_data="filter_all")],
     ])
     await message.answer("🔥 <b>Скидки в Steam</b>\n\nВыбери фильтр:", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("filter_"))
 async def filter_products(cb: CallbackQuery):
-    filter_type = cb.data.split("_", 1)[1]
-    
-    if filter_type == "90":
-        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE CAST(REPLACE(discount, '-', '') AS INTEGER) >= 90 AND image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
-    elif filter_type == "cheap":
-        # Простой фильтр по цене (ищем «до 100 ₽» по строке)
-        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE price LIKE '%₽' AND CAST(REPLACE(price, ' ₽', '') AS INTEGER) <= 100 AND image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
-    elif filter_type == "new":
-        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY created_at DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
-    else:  # all
-        products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
-    
-    if not products:
-        await cb.answer("😔 По этому фильтру ничего не найдено.", show_alert=True)
-        return
-    
-    total = len(products)
-    await cb.answer(f"Найдено: {total}")
-    await send_product_card(cb, products, 0, 0, total)
+    f = cb.data.split("_", 1)[1]
+    if f == "90": products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE CAST(REPLACE(discount, '-', '') AS INTEGER) >= 90 AND image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    elif f == "cheap": products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE price LIKE '%₽' AND CAST(REPLACE(price, ' ₽', '') AS INTEGER) <= 100 AND image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    elif f == "new": products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY created_at DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    else: products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY id DESC LIMIT ?", (PAGE_LIMIT,), fetch=True)
+    if not products: await cb.answer("Ничего не найдено.", show_alert=True); return
+    await cb.answer(f"Найдено: {len(products)}")
+    await send_product_card(cb, products, 0, 0, len(products))
 
 async def send_product_card(message_or_callback, products, index: int, offset: int, total: int):
     pid, title, price, old_price, discount, url, image, description, price_usd = products[index]
-    display_usd = f" (в долларах: {price_usd})" if (price_usd and "руб" not in price_usd.lower() and "₽" not in price_usd) else ""
     text = f"🎮 <b>{html.escape(title)}</b>\n\n"
-    if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
-    if price: text += f"💵 Цена: <b>{price}</b>{display_usd}\n"
-    if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
-    if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
-    global_index = offset + index + 1
-    text += f"\n📄 Игра {global_index} из {total}"
-    
-    uid = message_or_callback.from_user.id
-    is_fav = db_query("SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?", (uid, pid), fetchone=True)
-    
-    nav_row = []
-    if global_index > 1: nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{global_index - 2}"))
-    if global_index < total: nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{global_index}"))
-    
-    buttons = []
-    if nav_row: buttons.append(nav_row)
-    buttons.append([InlineKeyboardButton(text="🛒 Купить в Steam", url=url)])
-    # Кнопка поделиться (п. 28)
-    share_url = f"https://t.me/share/url?url={url}&text={html.escape(title)}"
-    buttons.append([InlineKeyboardButton(text="📤 Поделиться", url=share_url)])
-    
-    if is_fav:
-        buttons.append([InlineKeyboardButton(text="✅ В Избранном", callback_data="fav_already")])
-    else:
-        buttons.append([InlineKeyboardButton(text="⭐ Добавить в избранное", callback_data=f"fav_add_{pid}")])
-        
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    if not isinstance(message_or_callback, CallbackQuery):
-        ok = await send_game_photo(message_or_callback.bot, message_or_callback.chat.id, pid, image, text, kb)
-        if not ok:
-            await message_or_callback.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        return
-    
-    cb = message_or_callback
-    try: await cb.answer()
-    except Exception: pass
-    
-    msg = cb.message
-    if msg is None: return
-    
-    try:
-        if msg.photo:
-            row = db_query("SELECT tg_file_id FROM products WHERE id = ?", (pid,), fetchone=True)
-            media = row[0] if row and row[0] else None
-            if media is None:
-                data = await download_image(image)
-                if data: 
-                    data = apply_watermark(data)
-                    media = BufferedInputFile(data, filename="game.jpg")
-            if media:
-                await msg.edit_media(media=InputMediaPhoto(media=media, caption=text, parse_mode=ParseMode.HTML), reply_markup=kb)
-                return
-        else:
-            await msg.edit_text(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-            return
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e).lower(): return
-    
-    ok = await send_game_photo(cb.bot, msg.chat.id, pid, image, text, kb)
-    if not ok:
-        try: await cb.bot.send_message(chat_id=msg.chat.id, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        except Exception: return
-    try: await msg.delete()
-    except Exception: pass
-
-@router.callback_query(F.data.startswith("page_"))
-async def paginate_products(cb: CallbackQuery):
-    try: global_index = int(cb.data.split("_", 1)[1])
-    except (IndexError, ValueError): await cb.answer("Ошибка"); return
-    offset = (global_index // PAGE_LIMIT) * PAGE_LIMIT
-    index = global_index - offset
-    products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY id DESC LIMIT ? OFFSET ?", (PAGE_LIMIT, offset), fetch=True)
-    total = db_query("SELECT COUNT(*) FROM products WHERE image IS NOT NULL AND image != ''", fetchone=True)[0]
-    if 0 <= index < len(products): await send_product_card(cb, products, index, offset, total)
-    else: await cb.answer("Дальше игр нет", show_alert=False)
-
-# ---------- ДОБАВЛЕНИЕ В ИЗБРАННОЕ ----------
-@router.callback_query(F.data.startswith("fav_add_"))
-async def fav_add(cb: CallbackQuery):
-    uid = cb.from_user.id
-    pid = int(cb.data.split("_")[2])
-    
-    limit = favorites_limit(uid)
-    count = favorites_count(uid)
-    if count >= limit:
-        await cb.answer(f"Лимит Избранного: {limit} игр.\nКупи Премиум, чтобы добавить до 30!", show_alert=True)
-        return
-    
-    db_query("INSERT OR IGNORE INTO favorites (user_id, product_id) VALUES (?, ?)", (uid, pid))
-    await cb.answer("✅ Игра добавлена в Избранное! Теперь ты получишь уведомление, если на нее будет скидка.")
-    
-    products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE id = ?", (pid,), fetch=True)
-    if products:
-        total = db_query("SELECT COUNT(*) FROM products WHERE image IS NOT NULL AND image != ''", fetchone=True)[0]
-        await send_product_card(cb, products, 0, 0, total)
-
-@router.callback_query(F.data == "fav_already")
-async def fav_already(cb: CallbackQuery):
-    await cb.answer("✅ Эта игра уже в твоем Избранном!")
-
-@router.callback_query(F.data == "fav_show")
-async def fav_show(cb: CallbackQuery):
-    uid = cb.from_user.id
-    limit = favorites_limit(uid)
-    rows = db_query("SELECT p.id, p.title FROM favorites f JOIN products p ON p.id = f.product_id WHERE f.user_id = ? ORDER BY f.id", (uid,), fetch=True)
-    if not rows:
-        await cb.answer("Твое Избранное пусто", show_alert=True)
-        return
-    text = f"⭐ <b>Твое Избранное</b> ({len(rows)} / {limit}):\n\n"
-    buttons = []
-    for pid, title in rows:
-        text += f"• {html.escape(title)}\n"
-        buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {title[:25]}", callback_data=f"fav_del_{pid}")])
-    if not check_premium(uid):
-        text += "\n💎 Хочешь до 30 игр + уведомления о скидках? Купи Премиум!"
-        buttons.append([InlineKeyboardButton(text="💎 Премиум", callback_data="premium_show")])
-    try: await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    except TelegramBadRequest: await cb.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await cb.answer()
-
-@router.callback_query(F.data.startswith("fav_del_"))
-async def fav_del(cb: CallbackQuery):
-    try: pid = int(cb.data.split("_", 2)[2])
-    except (IndexError, ValueError): await cb.answer("Ошибка"); return
-    db_query("DELETE FROM favorites WHERE product_id = ? AND user_id = ?", (pid, cb.from_user.id))
-    await cb.answer("Удалено из Избранного")
-    await fav_show(cb)
-
-# ---------- СЛУЧАЙНАЯ ИГРА ----------
-async def pick_random_game(uid: int, is_prem: bool) -> tuple | None:
-    user_genres = get_user_genres(uid)
-    
-    if user_genres:
-        genre_conditions = " OR ".join(["genres LIKE ?"] * len(user_genres))
-        params = [f"%{escape_like(g)}%" for g in user_genres]
-        
-        if is_prem:
-            query = f"SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE ({genre_conditions}) AND discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 20"
-        else:
-            query = f"SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE ({genre_conditions}) AND image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1"
-        
-        candidates = db_query(query, params, fetch=True)
-        return random.choice(candidates) if candidates else None
-    else:
-        if is_prem:
-            candidates = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE discount IS NOT NULL AND discount != '' AND image IS NOT NULL AND image != '' ORDER BY CAST(REPLACE(discount, '-', '') AS INTEGER) DESC, RANDOM() LIMIT 20", fetch=True)
-            return random.choice(candidates) if candidates else None
-        else:
-            return db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL AND image != '' ORDER BY RANDOM() LIMIT 1", fetchone=True)
-
-@router.message(F.text == "🎲 Случайная игра")
-async def random_game(message: Message):
-    user_id = message.from_user.id
-    is_prem = check_premium(user_id)
-    
-    if not is_prem:
-        res = db_query("SELECT last_roulette FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-        last_str = res[0] if res else None
-        today = utcnow().date().isoformat()
-        
-        if last_str and last_str.startswith(today):
-            await message.answer(f"⏳ <b>Лимит рулетки!</b>\n\nОбычные пользователи — 1 раз в день.\nСледующая попытка завтра.\n\n💎 <b>Купи Премиум</b> — крути без ограничений!")
-            return
-
-    game = await pick_random_game(user_id, is_prem)
-    if not game:
-        await message.answer("В базе пока нет игр. Попробуй позже.")
-        return
-    
-    db_query("UPDATE users SET last_roulette = ? WHERE user_id = ?", (utcnow_iso(), user_id))
-    pid, title, price, old_price, discount, url, image, description, price_usd = game
-    display_usd = f" (в долларах: {price_usd})" if (price_usd and "руб" not in price_usd.lower() and "₽" not in price_usd) else ""
-    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
-    if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
-    if price: text += f"💵 Цена: <b>{price}</b>{display_usd}\n"
-    if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
-    if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
-    if is_prem: text += "\n👑 <i>Бонус Премиум: максимальная скидка!</i>"
-    
-    buttons = [[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]]
-    share_url = f"https://t.me/share/url?url={url}&text={html.escape(title)}"
-    buttons.append([InlineKeyboardButton(text="📤 Поделиться", url=share_url)])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    ok = await send_game_photo(message.bot, message.chat.id, pid, image, text, kb)
-    if not ok: await message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-@router.callback_query(F.data == "random_again")
-async def random_again(cb: CallbackQuery):
-    uid = cb.from_user.id
-    is_prem = check_premium(uid)
-    if not is_prem:
-        res = db_query("SELECT last_random_again FROM users WHERE user_id = ?", (uid,), fetchone=True)
-        last = parse_dt(res[0]) if res else None
-        if last and utcnow() - last < timedelta(minutes=10):
-            await cb.answer("⏳ Раз в 10 минут. Купи Премиум — без лимита!", show_alert=True)
-            return
-    
-    game = await pick_random_game(uid, is_prem)
-    await cb.answer()
-    
-    if not game: await cb.answer("В базе пока пусто", show_alert=True); return
-    if not is_prem: db_query("UPDATE users SET last_random_again = ? WHERE user_id = ?", (utcnow_iso(), uid))
-    pid, title, price, old_price, discount, url, image, description, price_usd = game
-    text = f"🎲 <b>Тебе выпала: {html.escape(title)}</b>\n\n"
     if old_price: text += f"❌ Старая цена: <s>{old_price}</s>\n"
     if price: text += f"💵 Цена: <b>{price}</b>\n"
     if discount: text += f"🔥 Скидка: <b>{discount}</b>\n"
-    if description: text += f"\n📝 <i>{safe_html_truncate(description, 150)}...</i>\n"
+    if description: text += f"\n📝 <i>{safe_html_truncate(description, 200)}...</i>\n"
+    text += f"\n📄 Игра {offset + index + 1} из {total}"
     
-    buttons = [[InlineKeyboardButton(text="🛒 Купить в Steam", url=url)]]
-    share_url = f"https://t.me/share/url?url={url}&text={html.escape(title)}"
-    buttons.append([InlineKeyboardButton(text="📤 Поделиться", url=share_url)])
+    uid = message_or_callback.from_user.id
+    is_fav = db_query("SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?", (uid, pid), fetchone=True)
+    nav_row = []
+    if offset + index + 1 > 1: nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"page_{offset + index - 1}"))
+    if offset + index + 1 < total: nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"page_{offset + index + 1}"))
+    buttons = []
+    if nav_row: buttons.append(nav_row)
+    buttons.append([InlineKeyboardButton(text="🛒 Купить", url=url), InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={url}&text={html.escape(title)}")])
+    if is_fav: buttons.append([InlineKeyboardButton(text="✅ В Избранном", callback_data="fav_already")])
+    else: buttons.append([InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav_add_{pid}")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    ok = await send_game_photo(cb.bot, cb.message.chat.id, pid, image, text, kb)
-    if not ok: await cb.message.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-# ---------- ПОПОЛНЕНИЕ STEAM ----------
-@router.message(F.text == "💳 Пополнить Steam")
-async def steam_topup_start(message: Message, state: FSMContext):
-    await state.set_state(TopUpFSM.waiting_login)
-    await message.answer("💳 <b>Пополнение Steam</b>\n\nШаг 1 из 2. Введи свой <b>логин Steam</b> (не пароль!).\nНапример: <i>my_nickname</i>\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="topup_cancel")]]))
-
-@router.callback_query(F.data == "topup_cancel")
-async def topup_cancel(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    try: await cb.message.edit_text("❌ Пополнение отменено.")
+    if not isinstance(message_or_callback, CallbackQuery):
+        if not await send_game_photo(message_or_callback.bot, message_or_callback.chat.id, pid, image, text, kb): await message_or_callback.answer(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        return
+    cb = message_or_callback
+    try: await cb.answer()
     except Exception: pass
-    await cb.answer()
+    msg = cb.message
+    if msg:
+        try:
+            if msg.photo:
+                row = db_query("SELECT tg_file_id FROM products WHERE id = ?", (pid,), fetchone=True)
+                media = row[0] if row and row[0] else None
+                if media is None:
+                    data = await download_image(image)
+                    if data: media = BufferedInputFile(apply_watermark(data), filename="game.jpg")
+                if media:
+                    await msg.edit_media(media=InputMediaPhoto(media=media, caption=text, parse_mode=ParseMode.HTML), reply_markup=kb)
+                    return
+            else:
+                await msg.edit_text(text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
+                return
+        except TelegramBadRequest: pass
+        if not await send_game_photo(cb.bot, msg.chat.id, pid, image, text, kb):
+            try: await cb.bot.send_message(chat_id=msg.chat.id, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            except Exception: return
+        try: await msg.delete()
+        except Exception: pass
 
-@router.message(TopUpFSM.waiting_login)
-async def topup_login(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    if raw.lower() in ("отмена", "cancel", "/cancel"):
-        await state.clear(); await message.answer("❌ Отменено.", reply_markup=main_menu_kb()); return
-    if not raw or len(raw) < 3 or " " in raw or len(raw) > 64:
-        await message.answer("⚠️ Некорректный логин. Попробуй ещё раз (от 3 до 64 символов, без пробелов)."); return
-    await state.update_data(login=raw); await state.set_state(TopUpFSM.waiting_amount)
-    await message.answer(f"👤 Логин: <b>{html.escape(raw)}</b>\n\nШаг 2 из 2. Введи <b>сумму пополнения в рублях</b> (только цифры).\nНапример: <i>500</i>\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="topup_cancel")]]))
+@router.callback_query(F.data.startswith("page_"))
+async def paginate_products(cb: CallbackQuery):
+    try: g_idx = int(cb.data.split("_", 1)[1])
+    except (IndexError, ValueError): return
+    offset = (g_idx // PAGE_LIMIT) * PAGE_LIMIT
+    idx = g_idx - offset
+    products = db_query("SELECT id, title, price, old_price, discount, url, image, description, price_usd FROM products WHERE image IS NOT NULL ORDER BY id DESC LIMIT ? OFFSET ?", (PAGE_LIMIT, offset), fetch=True)
+    total = db_query("SELECT COUNT(*) FROM products WHERE image IS NOT NULL", fetchone=True)[0]
+    if 0 <= idx < len(products): await send_product_card(cb, products, idx, offset, total)
 
-@router.message(TopUpFSM.waiting_amount)
-async def topup_amount(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    if raw.lower() in ("отмена", "cancel", "/cancel"):
-        await state.clear(); await message.answer("❌ Отменено.", reply_markup=main_menu_kb()); return
-    if not is_ascii_digits(raw) or len(raw) > 6: await message.answer("⚠️ Пожалуйста, введи сумму только цифрами (например, 500)."); return
-    amount = int(raw)
-    if amount < 100: await message.answer("⚠️ Минимальная сумма пополнения — 100 рублей. Попробуй ещё раз."); return
-    if amount > 50000: await message.answer("⚠️ Максимальная сумма — 50 000 рублей. Если нужно больше, сделай несколько пополнений."); return
-    data = await state.get_data(); login = data.get("login", ""); await state.clear()
-    db_query("INSERT INTO link_clicks (user_id, link_type) VALUES (?, ?)", (message.from_user.id, f"steam_sum_{amount}"))
-    url = f"https://plati.market/itm/{STEAM_TOPUP_ITEM_ID}?agent={PLATI_AGENT_ID}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Перейти к оплате", url=url)], [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_msg")]])
-    await message.answer(f"✅ <b>Готово к пополнению</b>\n\n👤 Логин: <b>{html.escape(login)}</b>\n💵 Сумма: <b>{amount} ₽</b>\n\n1️⃣ Нажми кнопку ниже — откроется страница товара.\n2️⃣ Вставь свой логин <b>{html.escape(login)}</b> в поле «Ваш логин Steam».\n3️⃣ Введи сумму <b>{amount}</b> в поле «Получу, РУБЛЕЙ RUB».\n4️⃣ Оплати картой и жди зачисления (5–15 минут).\n\n⚠️ <b>Важно:</b> пароль вводить не нужно — только логин!", reply_markup=kb)
-
-@router.callback_query(F.data == "close_msg")
-async def close_msg(cb: CallbackQuery):
-    try: await cb.message.delete()
-    except Exception: pass
-    await cb.answer()
-
-# ---------- МОБИЛЬНЫЕ ИГРЫ ----------
-@router.message(F.text == "📱 Мобильные игры")
-async def mobile_topup_menu(message: Message):
-    db_query("INSERT INTO link_clicks (user_id, link_type) VALUES (?, ?)", (message.from_user.id, "mobile_menu"))
-    PLATI_MOBILE_URL = f"https://plati.market/search/Донат?agent={PLATI_AGENT_ID}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎮 Каталог мобильных игр", url=PLATI_MOBILE_URL)], [InlineKeyboardButton(text="❓ Как это работает", callback_data="mobile_help")]])
-    await message.answer("📱 <b>Пополнение мобильных игр</b>\n\nПополняй любимые мобильные игры через <b>Plati.Market</b>:\n\n🎮 Genshin Impact, Honkai, PUBG Mobile, Brawl Stars и другие\n⚡ Быстрое зачисление (5–15 минут)\n💳 Оплата картами РФ\n\nНажми кнопку ниже 👇", reply_markup=kb)
-
-@router.callback_query(F.data == "mobile_help")
-async def mobile_help(cb: CallbackQuery):
-    await cb.answer()
-    await cb.message.answer("❓ <b>Как пополнить мобильную игру</b>\n\n1️⃣ Нажми «Пополнить мобильные игры»\n2️⃣ Выбери свою игру из списка\n3️⃣ Введи <b>игровой ID</b> (не логин/пароль!)\n4️⃣ Выбери номинал (например, 60 гемов, 100 UC)\n5️⃣ Оплати картой\n\n⚠️ <b>Важно:</b> вводи только игровой ID!\n\n" f"Если что-то пошло не так — пиши {PLATI_SUPPORT}")
-
-# ---------- РЕКЛАМА ----------
-@router.message(F.text == "📢 Реклама")
-async def ads_info(message: Message):
-    await message.answer(
-        "📢 <b>Реклама в нашем боте</b>\n\n"
-        "Покупая рекламу, вы получаете <b>рассылку вашего рекламного поста всем пользователям нашего бота</b>.\n\n"
-        "🎯 Мы отправим ваше сообщение (текст + фото/видео) каждому пользователю бота.\n"
-        "📊 Вы получите охват всей нашей аудитории.\n\n"
-        f"Для заказа и уточнения цены пиши: 👉 <b>{CONTACT_TG}</b>",
-        reply_markup=main_menu_kb(),
-    )
-
-# ---------- ДОНАТ (ПОДДЕРЖАТЬ) ----------
-@router.message(F.text == "❤️ Поддержать")
-async def donate_info(message: Message):
+@router.message(F.text == "💎 Премиум")
+async def premium_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💸 Сделать донат", url=DONATE_URL)],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="close_msg")]
+        [InlineKeyboardButton(text=f"🔥 7 дней — {STARS_7_DAYS} ⭐", callback_data="buy_premium_7")],
+        [InlineKeyboardButton(text=f"👑 30 дней — {STARS_30_DAYS} ⭐", callback_data="buy_premium_30")],
+        [InlineKeyboardButton(text=f"💎 6 мес — {STARS_180_DAYS} ⭐", callback_data="buy_premium_180")],
+        [InlineKeyboardButton(text=f"🏆 1 год — {STARS_365_DAYS} ⭐", callback_data="buy_premium_365")],
     ])
-    await message.answer(
-        "❤️ <b>Поддержать проект</b>\n\n"
-        "Если наш бот помогает тебе экономить на играх, ты можешь отблагодарить разработчика!\n\n"
-        "Твой донат пойдет на оплату сервера и развитие бота.\n\n"
-        "Спасибо за поддержку! 🙏",
-        reply_markup=kb,
-    )
+    await message.answer("💎 <b>Премиум</b>\n\nБезлимитная рулетка, 30 избранных, мгновенные алерты!\nВыбирай тариф:", reply_markup=kb)
 
-# ---------- ПОДДЕРЖКА ----------
-@router.message(F.text == "🆘 Поддержка")
-async def support_info(message: Message):
-    await message.answer(
-        "🆘 <b>Служба поддержки</b>\n\n"
-        f"📱 Telegram: {CONTACT_TG}\n"
-        f"✉️ Email: {CONTACT_EMAIL}\n\n"
-        "Напишите нам, если возникли вопросы по работе бота.",
-        reply_markup=main_menu_kb(),
-    )
-
-# ---------- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК КНОПКИ ОТМЕНА ----------
-@router.message(F.text.in_(["⬅️ Отмена", "отмена", "Отмена"]))
-async def global_cancel_button(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Действие отменено. Вы вернулись в главное меню.", reply_markup=main_menu_kb())
+@router.callback_query(F.data.startswith("buy_premium_"))
+async def buy_premium(cb: CallbackQuery):
+    days = int(cb.data.split("_")[2]); price = {7: STARS_7_DAYS, 30: STARS_30_DAYS, 180: STARS_180_DAYS, 365: STARS_365_DAYS}.get(days)
+    if not price: await cb.answer("Ошибка", show_alert=True); return
+    try:
+        await cb.bot.send_invoice(chat_id=cb.from_user.id, title=f"Премиум на {days} дней", description=f"Активация Премиум", payload=f"premium_{days}", provider_token="", currency="XTR", prices=[LabeledPrice(label="Премиум", amount=price)], start_parameter="premium")
+        await cb.answer("Счет выставлен!")
+    except Exception: await cb.answer("Ошибка.", show_alert=True)
 
 # ---------- АДМИНКА ----------
 @admin_router.message(Command("admin"))
-async def admin_cmd(message: Message):
-    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu_kb())
+async def admin_cmd(message: Message): await message.answer("🛠 Админка", reply_markup=admin_menu_kb())
 
 @admin_router.message(F.text == "⬅️ В меню")
-async def to_main(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Главное меню:", reply_markup=main_menu_kb())
-
-@admin_router.message(F.text == "🗑 Очистить базу")
-async def clear_db(message: Message):
-    db_query("DELETE FROM products")
-    await message.answer("✅ База игр очищена. Теперь нажми «🔄 Спарсить скидки», чтобы загрузить только реальные скидки.", reply_markup=admin_menu_kb())
+async def to_main(message: Message): await message.answer("Меню", reply_markup=main_menu_kb())
 
 @admin_router.message(F.text == "🔄 Спарсить скидки")
-async def manual_parse(message: Message):
-    await message.answer("⏳ Парсим Steam..."); await fetch_steam_deals(); await message.answer("✅ Парсинг завершён!", reply_markup=admin_menu_kb())
+async def manual_parse(message: Message): await message.answer("Парсим..."); await fetch_steam_deals(); await message.answer("Готово!", reply_markup=admin_menu_kb())
+
+@admin_router.message(F.text == "🗑 Очистить базу")
+async def clear_db(message: Message): db_query("DELETE FROM products"); await message.answer("Очищено.", reply_markup=admin_menu_kb())
+
+@admin_router.message(F.text == "💰 Баланс FazerCards")
+async def fazer_balance(message: Message):
+    bal = await fazer_get_balance()
+    if bal is None: await message.answer("Ошибка ключа/сети.")
+    else: await message.answer(f"💰 Баланс FazerCards: <b>${bal:.2f} USD</b>", reply_markup=admin_menu_kb())
 
 @admin_router.message(F.text == "📊 Статистика")
 async def stats(message: Message):
-    users = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
-    products = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]
-    wish = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
-    steam_clicks = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'steam%'", fetchone=True)[0]
-    mobile_clicks = db_query("SELECT COUNT(*) FROM link_clicks WHERE link_type LIKE 'mobile%'", fetchone=True)[0]
-    prem_list = list_premium_users()
-    prem_count = len(prem_list)
-    text_prem = f"\n👑 <b>Премиум: {prem_count}</b>\n"
-    if prem_count:
-        for uid, uname, fname, until in prem_list[:10]:
-            dt = parse_dt(until)
-            if dt:
-                days_left = (dt - utcnow()).days
-                text_prem += f"  • <code>{uid}</code> — {days_left} дн.\n"
-        if prem_count > 10: text_prem += f"  ... и ещё {prem_count - 10}\n"
-    await message.answer(f"📊 <b>Статистика</b>\n\n👥 Всего юзеров: {users}\n🎮 Игр: {products}\n⭐ Избранное (записей): {wish}\n💳 Кликов Steam: {steam_clicks}\n📱 Кликов Mobile: {mobile_clicks}\n{text_prem}", reply_markup=admin_menu_kb())
+    u = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]; p = db_query("SELECT COUNT(*) FROM products", fetchone=True)[0]; w = db_query("SELECT COUNT(*) FROM favorites", fetchone=True)[0]
+    await message.answer(f"👥 Юзеров: {u}\n🎮 Игр: {p}\n⭐ Избранное: {w}", reply_markup=admin_menu_kb())
 
-@admin_router.message(F.text == "👥 Рефералы")
-async def admin_refs(message: Message):
-    rows = db_query("""
-        SELECT u.user_id, u.username, u.first_name, u.joined_at, u.referred_by, u.ref_bonus_claimed
-        FROM users u
-        WHERE u.referred_by IS NOT NULL
-        ORDER BY u.joined_at DESC LIMIT 20
-    """, fetch=True)
-
-    if not rows:
-        await message.answer("Пока нет пользователей, которые пришли по реферальным ссылкам.", reply_markup=admin_menu_kb())
-        return
-
-    text = "👥 <b>Последние 20 рефералов:</b>\n\n"
-    for uid, uname, fname, joined, ref_by, claimed in rows:
-        status = "✅" if claimed else "⏳"
-        text += f"{status} <code>{uid}</code> | @{uname or '—'} | пришел от: <code>{ref_by}</code>\n"
-
-    await message.answer(text, reply_markup=admin_menu_kb())
-
-@admin_router.message(F.text == "🧪 Тест скидки дня")
-async def test_daily_deal(message: Message, bot: Bot):
-    await message.answer("⏳ Запускаю тестовую рассылку «Скидки дня»...")
-    await send_daily_deal(bot)
-    await message.answer("✅ Тест завершён. Проверь логи.", reply_markup=admin_menu_kb())
-
-# ---------- УПРАВЛЕНИЕ ПРОМОКОДАМИ ----------
-@admin_router.message(F.text == "🎟 Промокоды")
-async def admin_promo_menu(message: Message):
-    await message.answer(
-        "🎟 <b>Управление промокодами</b>\n\n"
-        "Здесь вы можете создавать новые промокоды и смотреть список существующих.",
-        reply_markup=promo_menu_kb()
-    )
-
-@admin_router.message(F.text == "⬅️ Назад в админку")
-async def admin_promo_back(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu_kb())
-
-@admin_router.message(F.text == "➕ Создать промокод")
-async def admin_promo_create_start(message: Message, state: FSMContext):
-    await state.set_state(PromoFSM.waiting_code)
-    await message.answer(
-        "➕ <b>Создание промокода</b>\n\n"
-        "Введите название промокода (например, <code>WELCOME2026</code>).\n"
-        "Он будет автоматически приведен к верхнему регистру.\n\n"
-        "<i>Напишите «отмена», чтобы выйти.</i>",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
-    )
-
-@admin_router.message(PromoFSM.waiting_code)
-async def admin_promo_create_code(message: Message, state: FSMContext):
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
-        return
-
-    code = (message.text or "").strip().upper()
-    if not code or " " in code:
-        await message.answer("⚠️ Код не должен содержать пробелов. Попробуйте снова.")
-        return
-
-    existing = db_query("SELECT 1 FROM promocodes WHERE code = ?", (code,), fetchone=True)
-    if existing:
-        await message.answer("⚠️ Такой промокод уже существует. Введите другой.")
-        return
-
-    await state.update_data(code=code)
-    await state.set_state(PromoFSM.waiting_days)
-    await message.answer(
-        f"Код: <b>{code}</b>\n\n"
-        "На сколько <b>дней</b> Премиума рассчитан этот код? (например, 7)\n\n"
-        "<i>Напишите «отмена», чтобы выйти.</i>",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
-    )
-
-@admin_router.message(PromoFSM.waiting_days)
-async def admin_promo_create_days(message: Message, state: FSMContext):
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
-        return
-
-    raw = (message.text or "").strip()
-    if not is_ascii_digits(raw) or int(raw) <= 0 or int(raw) > 3650:
-        await message.answer("⚠️ Введите число дней от 1 до 3650.")
-        return
-
-    await state.update_data(days=int(raw))
-    await state.set_state(PromoFSM.waiting_max_uses)
-    await message.answer(
-        "Сколько раз можно использовать этот промокод? (например, 1 для одноразового или 100 для массового)\n\n"
-        "<i>Напишите «отмена», чтобы выйти.</i>",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
-    )
-
-@admin_router.message(PromoFSM.waiting_max_uses)
-async def admin_promo_create_max_uses(message: Message, state: FSMContext):
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
-        return
-
-    raw = (message.text or "").strip()
-    if not is_ascii_digits(raw) or int(raw) <= 0:
-        await message.answer("⚠️ Введите число больше 0.")
-        return
-
-    await state.update_data(max_uses=int(raw))
-    await state.set_state(PromoFSM.waiting_expires)
-    await message.answer(
-        "На сколько <b>дней</b> рассчитан этот промокод (срок действия)?\n"
-        "Например: 30\n\n"
-        "<i>Напишите «отмена», чтобы выйти.</i>",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True)
-    )
-
-@admin_router.message(PromoFSM.waiting_expires)
-async def admin_promo_create_expires(message: Message, state: FSMContext):
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
-        return
-
-    raw = (message.text or "").strip()
-    if not is_ascii_digits(raw) or int(raw) <= 0:
-        await message.answer("⚠️ Введите число дней больше 0.")
-        return
-
-    expires_days = int(raw)
-    data = await state.get_data()
-    code = data.get("code")
-    days = data.get("days")
-    max_uses = data.get("max_uses")
-    expires_at = (utcnow() + timedelta(days=expires_days)).isoformat()
-
-    db_query("INSERT INTO promocodes (code, days, max_uses, expires_at) VALUES (?, ?, ?, ?)", (code, days, max_uses, expires_at))
-    await state.clear()
-
-    await message.answer(
-        f"✅ <b>Промокод создан!</b>\n\n"
-        f"Код: <code>{code}</code>\n"
-        f"Дней Премиума: <b>{days}</b>\n"
-        f"Максимум использований: <b>{max_uses}</b>\n"
-        f"Действует до: <b>{expires_at[:10]}</b>",
-        reply_markup=promo_menu_kb()
-    )
-
-@admin_router.message(F.text == "📋 Список промокодов")
-async def admin_promo_list(message: Message):
-    rows = db_query("SELECT code, days, max_uses, uses_count, expires_at FROM promocodes ORDER BY created_at DESC LIMIT 20", fetch=True)
-    if not rows:
-        await message.answer("Промокодов пока нет.", reply_markup=promo_menu_kb())
-        return
-
-    text = "🎟 <b>Последние 20 промокодов:</b>\n\n"
-    for code, days, max_uses, uses_count, expires_at in rows:
-        status = "✅" if uses_count < max_uses else "❌"
-        exp_text = expires_at[:10] if expires_at else "бессрочно"
-        text += f"{status} <code>{code}</code> | {days} дн. | {uses_count}/{max_uses} | до {exp_text}\n"
-
-    await message.answer(text, reply_markup=promo_menu_kb())
-
-@admin_router.message(PromoFSM.waiting_code, F.text == "⬅️ Отмена")
-async def admin_promo_cancel_code(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Отменено.", reply_markup=promo_menu_kb())
-
-# ---------- ВЫДАЧА/СНЯТИЕ ПРЕМИУМА ----------
-@admin_router.message(F.text == "🎁 Выдать премиум")
-async def admin_grant_start(message: Message, state: FSMContext):
-    await state.set_state(AdminPremiumFSM.waiting_user_id); await state.update_data(action="grant")
-    await message.answer("🎁 <b>Выдача Премиума</b>\n\nВведи <b>user_id</b> пользователя (число).", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_prem_cancel")]]))
-
-@admin_router.message(F.text == "🚫 Снять премиум")
-async def admin_revoke_start(message: Message, state: FSMContext):
-    await state.set_state(AdminPremiumFSM.waiting_user_id); await state.update_data(action="revoke")
-    await message.answer("🚫 <b>Снятие Премиума</b>\n\nВведи <b>user_id</b>:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_prem_cancel")]]))
-
-@admin_router.message(AdminPremiumFSM.waiting_user_id)
-async def admin_uid_router(message: Message, state: FSMContext):
-    data = await state.get_data(); action = data.get("action", "grant")
-    raw = (message.text or "").strip()
-    if raw.lower() in ("отмена", "cancel", "/cancel"):
-        await state.clear(); await message.answer("❌ Отменено.", reply_markup=admin_menu_kb()); return
-    if not is_ascii_digits(raw): await message.answer("⚠️ Нужно целое число — user_id."); return
-    target = int(raw)
-    if action == "revoke":
-        await state.clear()
-        if revoke_premium(target):
-            await message.answer(f"🚫 Премиум снят с <code>{target}</code>.", reply_markup=admin_menu_kb())
-            try: await message.bot.send_message(target, "ℹ️ Твой Премиум был отключён администратором.")
-            except Exception: pass
-        else: await message.answer("❌ Юзер не найден.", reply_markup=admin_menu_kb())
-        return
-    row = db_query("SELECT first_name, username FROM users WHERE user_id = ?", (target,), fetchone=True)
-    if not row: await message.answer("❌ Пользователь с таким ID не найден в базе."); return
-    await state.update_data(target_id=target); await state.set_state(AdminPremiumFSM.waiting_days)
-    fname, uname = row
-    await message.answer(f"👤 Найден: <b>{html.escape(fname or '—')}</b> (@{uname or '—'}, <code>{target}</code>)\n\nНа сколько <b>дней</b> выдать премиум? (например, 30)\nЕсли уже есть премиум — дни добавятся сверху.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_prem_cancel")]]))
-
-@admin_router.message(AdminPremiumFSM.waiting_days)
-async def admin_grant_days(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    if raw.lower() in ("отмена", "cancel", "/cancel"):
-        await state.clear(); await message.answer("❌ Отменено.", reply_markup=admin_menu_kb()); return
-    if not is_ascii_digits(raw): await message.answer("⚠️ Введи число дней от 1 до 3650."); return
-    days = int(raw)
-    if days <= 0 or days > 3650: await message.answer("⚠️ Введи число дней от 1 до 3650."); return
-    data = await state.get_data(); target = data.get("target_id"); await state.clear()
-    if not target: await message.answer("❌ Ошибка: пользователь не выбран.", reply_markup=admin_menu_kb()); return
-    ok = grant_premium_by_id(target, days)
-    if ok:
-        await message.answer(f"✅ Премиум выдан пользователю <code>{target}</code> на <b>{days} дн.</b>", reply_markup=admin_menu_kb())
-        try: await message.bot.send_message(target, f"🎉 <b>Тебе активирован Премиум на {days} дней!</b>\n\nСпасибо, что с нами 💎")
-        except Exception: pass
-    else: await message.answer("❌ Не удалось — юзер не найден.", reply_markup=admin_menu_kb())
-
-@admin_router.callback_query(F.data == "admin_prem_cancel")
-async def admin_prem_cancel(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    try: await cb.message.edit_text("❌ Отменено.")
-    except Exception: pass
-    await cb.answer()
-
-# ---------- РАССЫЛКА ----------
 @admin_router.message(F.text == "📢 Рассылка")
-async def admin_broadcast_start(message: Message, state: FSMContext):
+async def admin_broadcast(message: Message, state: FSMContext):
     await state.set_state(AdminBroadcastFSM.waiting_message)
-    await message.answer("📢 <b>Режим рассылки</b>\n\nОтправь мне сообщение (текст и/или фото), которое нужно разослать.\nПеред отправкой покажу предпросмотр.\n\n<i>Напиши «отмена», чтобы выйти.</i>", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Отмена")]], resize_keyboard=True))
+    await message.answer("Отправь текст/фото для рассылки (или 'отмена'):")
 
 @admin_router.message(AdminBroadcastFSM.waiting_message)
-async def admin_broadcast_preview(message: Message, state: FSMContext, bot: Bot):
-    if message.text == "⬅️ Отмена" or (message.text and message.text.lower() in ("отмена", "cancel", "/cancel")):
-        await state.clear(); await message.answer("❌ Рассылка отменена.", reply_markup=admin_menu_kb()); return
-    photo_id = message.photo[-1].file_id if message.photo else None
-    text = message.text if message.text else message.caption
-    if not photo_id and not text: await message.answer("⚠️ Сообщение пустое. Отправь текст или фото."); return
-    await state.update_data(photo_id=photo_id, text=text); await state.set_state(AdminBroadcastFSM.waiting_confirm)
-    total = db_query("SELECT COUNT(*) FROM users", fetchone=True)[0]
-    eta_sec = total * 0.05; eta_str = f"{int(eta_sec // 60)} мин {int(eta_sec % 60)} сек"
-    await message.answer(f"👁 <b>Предпросмотр</b>\n\nПолучателей: <b>{total}</b>\nОриентировочное время: <b>{eta_str}</b>\n\nОтправляем?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Отправить", callback_data="bc_send")], [InlineKeyboardButton(text="❌ Отмена", callback_data="bc_cancel")]]))
-    try:
-        if photo_id: await bot.send_photo(chat_id=message.chat.id, photo=photo_id, caption=text, parse_mode=ParseMode.HTML)
-        else: await bot.send_message(chat_id=message.chat.id, text=text, parse_mode=ParseMode.HTML)
-    except Exception as e: await message.answer(f"⚠️ Не удалось показать предпросмотр: {e}")
+async def bc_preview(message: Message, state: FSMContext, bot: Bot):
+    if message.text and message.text.lower() in ("отмена", "cancel"): await state.clear(); await message.answer("Отмена.", reply_markup=admin_menu_kb()); return
+    p_id = message.photo[-1].file_id if message.photo else None; txt = message.text if message.text else message.caption
+    await state.update_data(pid=p_id, txt=txt); await state.set_state(AdminBroadcastFSM.waiting_confirm)
+    await message.answer("Отправить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Да", callback_data="bc_yes")], [InlineKeyboardButton(text="❌ Нет", callback_data="bc_no")]]))
 
-@admin_router.callback_query(F.data == "bc_cancel")
-async def admin_broadcast_cancel(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    try: await cb.message.edit_text("❌ Рассылка отменена.")
-    except Exception: pass
-    await cb.answer()
+@admin_router.callback_query(F.data == "bc_no")
+async def bc_no(cb: CallbackQuery, state: FSMContext): await state.clear(); await cb.message.edit_text("Отменено."); await cb.answer()
 
-@admin_router.callback_query(F.data == "bc_send")
-async def admin_broadcast_send(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    data = await state.get_data(); photo_id = data.get("photo_id"); text = data.get("text"); await state.clear()
-    if not photo_id and not text: await cb.answer("Пустое сообщение", show_alert=True); return
-    users = db_query("SELECT user_id FROM users", fetch=True); total = len(users)
-    try: await cb.message.edit_text(f"⏳ Рассылка для {total} пользователей...")
-    except Exception: pass
-    await cb.answer()
-    sent, blocked = 0, 0
+@admin_router.callback_query(F.data == "bc_yes")
+async def bc_yes(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data(); p = data.get("pid"); t = data.get("txt"); await state.clear()
+    users = db_query("SELECT user_id FROM users", fetch=True); sent = 0
+    await cb.message.edit_text(f"Рассылка на {len(users)}...")
     for (uid,) in users:
         try:
-            if photo_id: await bot.send_photo(chat_id=uid, photo=photo_id, caption=text, parse_mode=ParseMode.HTML)
-            else: await bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
+            if p: await bot.send_photo(uid, p, caption=t)
+            else: await bot.send_message(uid, t)
             sent += 1
-        except TelegramRetryAfter as e:
-            logger.warning(f"[BC] Flood control: waiting {e.retry_after} sec")
-            await asyncio.sleep(e.retry_after)
-            try:
-                if photo_id: await bot.send_photo(chat_id=uid, photo=photo_id, caption=text, parse_mode=ParseMode.HTML)
-                else: await bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
-                sent += 1
-            except Exception: blocked += 1
-        except TelegramBadRequest as e:
-            if "blocked" in str(e).lower() or "chat not found" in str(e).lower(): db_query("DELETE FROM users WHERE user_id = ?", (uid,))
-            blocked += 1
-        except TelegramForbiddenError:
-            db_query("DELETE FROM users WHERE user_id = ?", (uid,))
-            db_query("DELETE FROM user_genres WHERE user_id = ?", (uid,))
-            db_query("DELETE FROM favorites WHERE user_id = ?", (uid,))
-            db_query("DELETE FROM link_clicks WHERE user_id = ?", (uid,))
-            blocked += 1
-        except Exception: blocked += 1
+        except Exception: pass
         await asyncio.sleep(0.05)
-    try: await cb.message.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent}\n🚫 Заблокировали/Ошибка: {blocked}")
-    except Exception: await bot.send_message(cb.from_user.id, f"✅ Рассылка: {sent} отправлено, {blocked} ошибок.", reply_markup=admin_menu_kb())
-    await bot.send_message(cb.from_user.id, "Готово.", reply_markup=admin_menu_kb())
+    await cb.message.edit_text(f"Отправлено: {sent}"); await cb.answer()
 
 # ---------- ЗАПУСК ----------
 async def main():
@@ -2133,20 +1162,17 @@ async def main():
     dp.include_router(admin_router)
     dp.errors.register(errors_handler)
 
-    timezone_msk = timezone(timedelta(hours=3))
-    scheduler = AsyncIOScheduler(timezone=timezone_msk)
-    
-    scheduler.add_job(fetch_steam_deals, "cron", hour=0, minute=0, max_instances=1)
-    scheduler.add_job(send_daily_stats, "cron", hour=12, minute=0, args=[bot], max_instances=1)
-    scheduler.add_job(send_daily_deal, "cron", hour=12, minute=5, args=[bot], max_instances=1)
-    scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot], max_instances=1)
-    scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot], max_instances=1)
-    scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot], max_instances=1)
-    
+    scheduler = AsyncIOScheduler(timezone=timezone(timedelta(hours=3)))
+    scheduler.add_job(fetch_steam_deals, "cron", hour=0, minute=0)
+    scheduler.add_job(send_daily_stats, "cron", hour=12, minute=0, args=[bot])
+    scheduler.add_job(send_daily_deal, "cron", hour=12, minute=5, args=[bot])
+    scheduler.add_job(send_daily_deal, "cron", hour=19, minute=0, args=[bot])
+    scheduler.add_job(notify_premium_super_deals, "interval", hours=3, args=[bot])
+    scheduler.add_job(notify_favorites_matches, "interval", minutes=30, args=[bot])
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен (Фильтры, Ежедневный бонус, /help, Rate limit)!")
+    logger.info("Бот запущен с FazerCards API!")
     try: await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
